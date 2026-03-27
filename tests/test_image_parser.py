@@ -2,6 +2,7 @@ from pathlib import Path
 import types
 
 from PIL import Image
+import pytest
 
 import voltorb_solver.image_import.parser as parser_module
 from voltorb_solver.image_import.parser import ImageParser
@@ -46,3 +47,24 @@ def test_tesseract_unavailable_warning_is_actionable(monkeypatch, tmp_path: Path
     result = parser.parse_image(str(image_path), (0, 0, 100, 100))
 
     assert any("set `TESSERACT_CMD`" in warning for warning in result.warnings)
+
+
+def test_parse_known_voltorb_screenshot_when_ocr_available() -> None:
+    sample_path = Path(__file__).resolve().parent.parent / "GameBoard.png"
+    if not sample_path.exists():
+        pytest.skip("GameBoard.png sample image not available in repository")
+
+    parser = ImageParser()
+    width, height = Image.open(sample_path).size
+    result = parser.parse_image(str(sample_path), (0, 0, width, height))
+
+    if any("Tesseract OCR engine is unavailable" in warning for warning in result.warnings):
+        pytest.skip("Tesseract runtime not available for OCR regression test")
+
+    parsed_rows = [(clue.voltorbs, clue.total) for clue in result.row_clues]
+    parsed_cols = [(clue.voltorbs, clue.total) for clue in result.col_clues]
+
+    assert len(parsed_rows) == 5
+    assert len(parsed_cols) == 5
+    assert all(0 <= bombs <= 5 and 0 <= total <= 15 for bombs, total in parsed_rows)
+    assert all(0 <= bombs <= 5 and 0 <= total <= 15 for bombs, total in parsed_cols)

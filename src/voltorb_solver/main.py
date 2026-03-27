@@ -1,17 +1,10 @@
 from __future__ import annotations
 
-import sys
-
-from PySide6.QtWidgets import QApplication
-
-from voltorb_solver.ui.main_window import MainWindow
+from voltorb_solver.overlay_app import run_overlay_app
 
 
 def main() -> int:
-    app = QApplication(sys.argv)
-    window = MainWindow()
-    window.show()
-    return app.exec()
+    return run_overlay_app()
 
 
 if __name__ == "__main__":
