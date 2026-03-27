@@ -33,4 +33,6 @@ pytest -q
 ## Notes
 
 - OCR quality depends on local Tesseract installation and screenshot clarity.
+- Linux install example: `sudo apt install tesseract-ocr`.
+- If the app cannot find Tesseract, set `TESSERACT_CMD` to the executable path (for example `export TESSERACT_CMD=/usr/bin/tesseract`).
 - If OCR fails, you can still use full manual entry.

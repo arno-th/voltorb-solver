@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import re
+import shutil
 from dataclasses import dataclass, field
 
 from PIL import Image
@@ -40,6 +42,12 @@ class ImageParser:
             )
             return result
 
+        if not self._configure_tesseract_runtime():
+            result.warnings.append(
+                "Tesseract OCR engine is unavailable at runtime. Install `tesseract`, add it to PATH, or set `TESSERACT_CMD`."
+            )
+            return result
+
         cv_img = cv2.cvtColor(np.array(cropped), cv2.COLOR_RGB2BGR)
         gray = cv2.cvtColor(cv_img, cv2.COLOR_BGR2GRAY)
         blur = cv2.GaussianBlur(gray, (3, 3), 0)
@@ -47,9 +55,19 @@ class ImageParser:
 
         try:
             data = pytesseract.image_to_data(processed, output_type=pytesseract.Output.DICT)
-        except Exception:
+        except pytesseract.TesseractNotFoundError:
             result.warnings.append(
-                "Tesseract OCR engine is unavailable at runtime. Install `tesseract` or enter clues manually."
+                "Tesseract OCR engine is unavailable at runtime. Install `tesseract`, add it to PATH, or set `TESSERACT_CMD`."
+            )
+            return result
+        except pytesseract.TesseractError as exc:
+            result.warnings.append(
+                f"OCR failed with Tesseract error: {exc}. Enter clues manually."
+            )
+            return result
+        except Exception as exc:
+            result.warnings.append(
+                f"OCR failed while reading image: {exc}. Enter clues manually."
             )
             return result
         tokens = self._extract_numeric_tokens(data)
@@ -81,6 +99,52 @@ class ImageParser:
             "OCR clue ordering is heuristic. Verify imported clues before trusting recommendations."
         )
         return result
+
+    def _configure_tesseract_runtime(self) -> bool:
+        if pytesseract is None:
+            return False
+
+        configured_cmd = getattr(pytesseract.pytesseract, "tesseract_cmd", "tesseract")
+        candidates: list[str] = []
+
+        env_cmd = os.environ.get("TESSERACT_CMD", "").strip()
+        if env_cmd:
+            candidates.append(env_cmd)
+
+        if configured_cmd:
+            candidates.append(configured_cmd)
+
+        which_cmd = shutil.which("tesseract")
+        if which_cmd:
+            candidates.append(which_cmd)
+
+        # Common install paths help when GUI launches without shell PATH initialization.
+        candidates.extend(
+            [
+                "/usr/bin/tesseract",
+                "/usr/local/bin/tesseract",
+                "/opt/homebrew/bin/tesseract",
+            ]
+        )
+
+        seen: set[str] = set()
+        for cmd in candidates:
+            cmd = cmd.strip()
+            if not cmd or cmd in seen:
+                continue
+            seen.add(cmd)
+
+            if os.path.isabs(cmd) and not (os.path.isfile(cmd) and os.access(cmd, os.X_OK)):
+                continue
+
+            pytesseract.pytesseract.tesseract_cmd = cmd
+            try:
+                pytesseract.get_tesseract_version()
+            except Exception:
+                continue
+            return True
+
+        return False
 
     def _extract_numeric_tokens(self, data: dict) -> list[int]:
         tokens: list[tuple[int, int, int]] = []

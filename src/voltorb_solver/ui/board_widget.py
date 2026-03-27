@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from PySide6.QtCore import Signal
-from PySide6.QtWidgets import QGridLayout, QPushButton, QWidget
+from PySide6.QtCore import QSize, Signal
+from PySide6.QtGui import QResizeEvent
+from PySide6.QtWidgets import QGridLayout, QPushButton, QSizePolicy, QWidget
 
 from voltorb_solver.game_state import BOARD_SIZE, GameState
 from voltorb_solver.solver import SolverSnapshot
@@ -13,32 +14,69 @@ class BoardWidget(QWidget):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._buttons: list[list[QPushButton]] = []
+        self._selected: tuple[int, int] | None = None
 
-        grid = QGridLayout(self)
-        grid.setSpacing(4)
+        self._grid = QGridLayout(self)
+        self._grid.setContentsMargins(2, 2, 2, 2)
+        self._grid.setSpacing(8)
 
         for r in range(BOARD_SIZE):
             row_buttons: list[QPushButton] = []
             for c in range(BOARD_SIZE):
                 btn = QPushButton("?")
-                btn.setMinimumSize(70, 70)
+                btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
                 btn.clicked.connect(lambda _checked=False, row=r, col=c: self.tile_clicked.emit(row, col))
-                grid.addWidget(btn, r, c)
+                self._grid.addWidget(btn, r, c)
                 row_buttons.append(btn)
             self._buttons.append(row_buttons)
 
-    def render(self, state: GameState, snapshot: SolverSnapshot) -> None:
+    def minimumSizeHint(self) -> QSize:
+        return QSize(320, 320)
+
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        super().resizeEvent(event)
+        self._update_button_sizes()
+
+    def _update_button_sizes(self) -> None:
+        margins = self._grid.contentsMargins()
+        spacing_total = self._grid.spacing() * (BOARD_SIZE - 1)
+        usable_w = max(100, self.width() - margins.left() - margins.right() - spacing_total)
+        usable_h = max(100, self.height() - margins.top() - margins.bottom() - spacing_total)
+        side = max(46, min(140, min(usable_w, usable_h) // BOARD_SIZE))
+
+        for row in self._buttons:
+            for btn in row:
+                btn.setFixedSize(side, side)
+
+    def render(
+        self,
+        state: GameState,
+        snapshot: SolverSnapshot,
+        selected: tuple[int, int] | None = None,
+    ) -> None:
+        self._selected = selected
         for r in range(BOARD_SIZE):
             for c in range(BOARD_SIZE):
                 btn = self._buttons[r][c]
                 tile = state.board[r][c]
+                is_selected = self._selected == (r, c)
+                border = "3px solid #0ea5a0" if is_selected else "1px solid #b6ccdf"
                 if tile.revealed and tile.value is not None:
                     btn.setText(str(tile.value))
                     if tile.value == 0:
-                        btn.setStyleSheet("background-color: #c44; color: white; font-weight: bold;")
+                        btn.setStyleSheet(
+                            f"background-color: #ef4444; color: white; font-weight: 700; font-size: 20px;"
+                            f" border: {border}; border-radius: 12px;"
+                        )
                     else:
-                        btn.setStyleSheet("background-color: #3a7; color: white; font-weight: bold;")
+                        btn.setStyleSheet(
+                            f"background-color: #10b981; color: white; font-weight: 700; font-size: 20px;"
+                            f" border: {border}; border-radius: 12px;"
+                        )
                 else:
                     bomb_p = snapshot.bomb_probabilities.get((r, c), 0.0)
                     btn.setText(f"?\nB:{bomb_p:.0%}")
-                    btn.setStyleSheet("background-color: #263238; color: #f5f5f5;")
+                    btn.setStyleSheet(
+                        f"background-color: #f8fcff; color: #1f3a5f; font-weight: 600;"
+                        f" border: {border}; border-radius: 12px;"
+                    )

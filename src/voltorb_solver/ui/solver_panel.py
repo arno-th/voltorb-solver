@@ -10,20 +10,45 @@ class SolverPanel(QWidget):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
 
         self.status = QLabel("Configurations: 0")
+        self.status.setObjectName("solverStatus")
         self.errors = QLabel("")
-        self.errors.setStyleSheet("color: #d84315;")
+        self.errors.setObjectName("solverErrors")
 
         self.safest_list = QListWidget()
         self.best_ev_list = QListWidget()
 
         layout.addWidget(self.status)
-        layout.addWidget(QLabel("Safest Moves"))
+        safest_label = QLabel("Safest Moves")
+        safest_label.setObjectName("solverSection")
+        layout.addWidget(safest_label)
         layout.addWidget(self.safest_list)
-        layout.addWidget(QLabel("Best Expected Value"))
+        ev_label = QLabel("Best Expected Value")
+        ev_label.setObjectName("solverSection")
+        layout.addWidget(ev_label)
         layout.addWidget(self.best_ev_list)
         layout.addWidget(self.errors)
+
+        self.setStyleSheet(
+            """
+            QLabel#solverStatus {
+                color: #0f172a;
+                font-size: 15px;
+                font-weight: 700;
+            }
+            QLabel#solverSection {
+                color: #1d4f91;
+                font-weight: 700;
+            }
+            QLabel#solverErrors {
+                color: #b91c1c;
+                font-weight: 600;
+            }
+            """
+        )
 
     def render(
         self,
