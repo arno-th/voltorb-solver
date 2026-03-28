@@ -23,13 +23,37 @@ class ScreenParseResult:
     image_height: int
     regions: list[Region]
     warnings: list[str]
+    region_methods: dict[str, str]
 
     def by_name(self) -> dict[str, Region]:
         return {region.name: region for region in self.regions}
 
+    def method_summary(self) -> str:
+        board_methods = {method for name, method in self.region_methods.items() if name.startswith("(")}
+        row_methods = {
+            method
+            for name, method in self.region_methods.items()
+            if name.startswith("r") and name[1:].isdigit()
+        }
+        col_methods = {
+            method
+            for name, method in self.region_methods.items()
+            if name.startswith("c") and name[1:].isdigit()
+        }
+
+        board = ",".join(sorted(board_methods)) if board_methods else "unknown"
+        rows = ",".join(sorted(row_methods)) if row_methods else "unknown"
+        cols = ",".join(sorted(col_methods)) if col_methods else "unknown"
+        return f"tiles((0,0)-(4,4))={board}; rows(r0-r4)={rows}; cols(c0-c4)={cols}"
+
 
 class ScreenBoardParser:
     """Detects coarse Voltorb Flip regions from a full screenshot."""
+
+    def __init__(self) -> None:
+        self._clue_templates: list[np.ndarray] = []
+        self._tile_templates: list[np.ndarray] = []
+        self._anchor_templates: list[np.ndarray] = []
 
     def parse(self, image_path: str) -> ScreenParseResult:
         image = cv2.imread(image_path)
@@ -44,17 +68,43 @@ class ScreenBoardParser:
             warnings.append("Could not detect game panel from screenshot; using full image.")
             panel = (0, 0, image_w, image_h)
 
-        board = self._detect_board_grid(image, panel)
+        board_method = "tile-template-grid"
+        board = self._detect_board_grid_from_templates(image, panel)
+        if board is None:
+            board_method = "contour-grid"
+            board = self._detect_board_grid(image, panel)
         if board is None:
             warnings.append("Could not detect board grid by tile contours; using panel-relative fallback.")
+            board_method = "panel-fallback-grid"
             board = self._fallback_board(panel)
 
         regions = self._build_regions(image_w, image_h, panel, board)
+        regions, row_method, col_method = self._refine_clue_regions_with_templates(
+            image,
+            regions,
+            board,
+            warnings,
+        )
+
+        region_methods: dict[str, str] = {}
+        for region in regions:
+            if region.name.startswith("("):
+                region_methods[region.name] = board_method
+                continue
+            if region.name.startswith("r") and region.name[1:].isdigit():
+                region_methods[region.name] = row_method
+                continue
+            if region.name.startswith("c") and region.name[1:].isdigit():
+                region_methods[region.name] = col_method
+                continue
+            region_methods[region.name] = "unknown"
+
         return ScreenParseResult(
             image_width=image_w,
             image_height=image_h,
             regions=regions,
             warnings=warnings,
+            region_methods=region_methods,
         )
 
     def annotate(self, image_path: str, output_path: str) -> ScreenParseResult:
@@ -165,6 +215,117 @@ class ScreenBoardParser:
         board_h = int(round((y_centers[-1] - y_centers[0]) + side))
         return board_x, board_y, board_w, board_h
 
+    def _detect_board_grid_from_templates(
+        self,
+        image: np.ndarray,
+        panel: tuple[int, int, int, int],
+    ) -> tuple[int, int, int, int] | None:
+        tile_templates = self._load_tile_templates()
+        if not tile_templates:
+            return None
+
+        px, py, pw, ph = panel
+        roi = image[py : py + ph, px : px + pw]
+        if roi.size == 0:
+            return None
+
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        centers, sides = self._match_tile_centers(gray, tile_templates)
+        if len(centers) < 12:
+            return None
+
+        # Optional anchor can reduce false-positive clusters when available.
+        anchor = self._find_anchor(gray)
+        if anchor is not None:
+            ax, ay = anchor
+            centers = [center for center in centers if center[0] >= ax - 12 and center[1] >= ay - 12]
+            if len(centers) < 12:
+                return None
+
+        tolerance = max(8, int(round(np.median(sides) * 0.35))) if sides else 10
+        x_clusters = self._cluster_axis([x for x, _y in centers], tolerance=tolerance)
+        y_clusters = self._cluster_axis([y for _x, y in centers], tolerance=tolerance)
+        if len(x_clusters) < 5 or len(y_clusters) < 5:
+            return None
+
+        x_clusters = sorted(x_clusters, key=lambda c: c[1], reverse=True)[:5]
+        y_clusters = sorted(y_clusters, key=lambda c: c[1], reverse=True)[:5]
+        x_centers = sorted(cluster[0] for cluster in x_clusters)
+        y_centers = sorted(cluster[0] for cluster in y_clusters)
+
+        if len(x_centers) < 5 or len(y_centers) < 5:
+            return None
+
+        if sides:
+            side = int(round(np.median(sides)))
+        else:
+            side = int(round(min(pw, ph) * 0.16))
+
+        board_x = int(round(px + x_centers[0] - side / 2))
+        board_y = int(round(py + y_centers[0] - side / 2))
+        board_w = int(round((x_centers[-1] - x_centers[0]) + side))
+        board_h = int(round((y_centers[-1] - y_centers[0]) + side))
+        return board_x, board_y, board_w, board_h
+
+    def _match_tile_centers(
+        self,
+        gray_image: np.ndarray,
+        tile_templates: list[np.ndarray],
+    ) -> tuple[list[tuple[float, float]], list[int]]:
+        points: list[tuple[float, float, int, float]] = []
+
+        for template in tile_templates:
+            th, tw = template.shape[:2]
+            if tw > gray_image.shape[1] or th > gray_image.shape[0]:
+                continue
+
+            response = cv2.matchTemplate(gray_image, template, cv2.TM_CCOEFF_NORMED)
+            y_idxs, x_idxs = np.where(response >= 0.62)
+            for y, x in zip(y_idxs.tolist(), x_idxs.tolist()):
+                cx = x + tw / 2.0
+                cy = y + th / 2.0
+                score = float(response[y, x])
+                points.append((cx, cy, int(round((tw + th) / 2.0)), score))
+
+        if not points:
+            return [], []
+
+        # Non-maximum suppression by center distance keeps strongest nearby response.
+        points.sort(key=lambda item: item[3], reverse=True)
+        kept: list[tuple[float, float, int]] = []
+        min_sep = max(8.0, np.median([point[2] for point in points]) * 0.42)
+        for cx, cy, side, _score in points:
+            if any(abs(cx - kx) <= min_sep and abs(cy - ky) <= min_sep for kx, ky, _ks in kept):
+                continue
+            kept.append((cx, cy, side))
+
+        centers = [(cx, cy) for cx, cy, _side in kept]
+        sides = [side for _cx, _cy, side in kept]
+        return centers, sides
+
+    def _find_anchor(self, gray_image: np.ndarray) -> tuple[float, float] | None:
+        anchors = self._load_anchor_templates()
+        if not anchors:
+            return None
+
+        best_score = -1.0
+        best_center: tuple[float, float] | None = None
+
+        for anchor in anchors:
+            ah, aw = anchor.shape[:2]
+            if aw > gray_image.shape[1] or ah > gray_image.shape[0]:
+                continue
+
+            response = cv2.matchTemplate(gray_image, anchor, cv2.TM_CCOEFF_NORMED)
+            _min_val, max_val, _min_loc, max_loc = cv2.minMaxLoc(response)
+            if max_val > best_score:
+                best_score = float(max_val)
+                best_center = (max_loc[0] + aw / 2.0, max_loc[1] + ah / 2.0)
+
+        if best_center is None or best_score < 0.52:
+            return None
+        return best_center
+
     def _fallback_board(self, panel: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
         px, py, pw, ph = panel
         board_w = int(round(pw * 0.57))
@@ -244,6 +405,215 @@ class ScreenBoardParser:
 
         return regions
 
+    def _refine_clue_regions_with_templates(
+        self,
+        image: np.ndarray,
+        regions: list[Region],
+        board: tuple[int, int, int, int],
+        warnings: list[str],
+    ) -> tuple[list[Region], str, str]:
+        templates = self._load_clue_templates()
+        if not templates:
+            warnings.append("No clue templates found; using heuristic clue box locations.")
+            return regions, "heuristic-clue", "heuristic-clue"
+
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        region_by_name = {region.name: region for region in regions}
+
+        expected_rows: list[Region] = [
+            region_by_name[f"r{idx}"] for idx in range(5) if f"r{idx}" in region_by_name
+        ]
+        expected_cols: list[Region] = [
+            region_by_name[f"c{idx}"] for idx in range(5) if f"c{idx}" in region_by_name
+        ]
+        if len(expected_rows) != 5 or len(expected_cols) != 5:
+            return regions, "heuristic-clue", "heuristic-clue"
+
+        row_matches = self._match_clue_regions(gray, expected_rows, templates, axis="row")
+        col_matches = self._match_clue_regions(gray, expected_cols, templates, axis="col")
+
+        if row_matches is None or col_matches is None:
+            warnings.append("Template matching for clue boxes was low confidence; using heuristic clue regions.")
+            return regions, "heuristic-clue", "heuristic-clue"
+
+        bx, by, bw, bh = board
+        board_right = bx + bw
+        board_bottom = by + bh
+
+        # Reject obvious false matches that cross onto the board area.
+        if any(match.x < board_right for match in row_matches):
+            warnings.append("Template row clue matches overlapped board area; using heuristic row clues.")
+            row_matches = expected_rows
+            row_method = "heuristic-clue"
+        else:
+            row_method = "template-clue"
+        if any(match.y < board_bottom for match in col_matches):
+            warnings.append("Template column clue matches overlapped board area; using heuristic column clues.")
+            col_matches = expected_cols
+            col_method = "heuristic-clue"
+        else:
+            col_method = "template-clue"
+
+        row_matches = sorted(row_matches, key=lambda region: region.y)
+        col_matches = sorted(col_matches, key=lambda region: region.x)
+
+        merged: list[Region] = []
+        for region in regions:
+            if region.name.startswith("r") and region.name[1:].isdigit():
+                idx = int(region.name[1:])
+                merged.append(row_matches[idx])
+                continue
+            if region.name.startswith("c") and region.name[1:].isdigit():
+                idx = int(region.name[1:])
+                merged.append(col_matches[idx])
+                continue
+            merged.append(region)
+
+        return merged, row_method, col_method
+
+    def _match_clue_regions(
+        self,
+        gray_image: np.ndarray,
+        expected_regions: list[Region],
+        templates: list[np.ndarray],
+        *,
+        axis: str,
+    ) -> list[Region] | None:
+        image_h, image_w = gray_image.shape[:2]
+        matched: list[Region] = []
+
+        for idx, expected in enumerate(expected_regions):
+            if axis == "row":
+                pad_x = int(round(expected.w * 0.9))
+                pad_y = int(round(expected.h * 0.4))
+            else:
+                pad_x = int(round(expected.w * 0.4))
+                pad_y = int(round(expected.h * 1.1))
+
+            sx = max(0, expected.x - pad_x)
+            sy = max(0, expected.y - pad_y)
+            ex = min(image_w, expected.x + expected.w + pad_x)
+            ey = min(image_h, expected.y + expected.h + pad_y)
+            search = gray_image[sy:ey, sx:ex]
+            if search.size == 0:
+                return None
+
+            expected_area = expected.w * expected.h
+            best_score = -1.0
+            best_rect: tuple[int, int, int, int] | None = None
+
+            for template in templates:
+                th, tw = template.shape[:2]
+                if tw > search.shape[1] or th > search.shape[0]:
+                    continue
+
+                area_ratio = (tw * th) / max(expected_area, 1)
+                if not (0.35 <= area_ratio <= 1.85):
+                    continue
+
+                response = cv2.matchTemplate(search, template, cv2.TM_CCOEFF_NORMED)
+                _min_val, max_val, _min_loc, max_loc = cv2.minMaxLoc(response)
+                if max_val > best_score:
+                    best_score = float(max_val)
+                    best_rect = (sx + max_loc[0], sy + max_loc[1], tw, th)
+
+            # Minimum confidence tuned to avoid replacing decent heuristic boxes with noise.
+            if best_rect is None or best_score < 0.40:
+                return None
+
+            x, y, w, h = best_rect
+            matched.append(
+                Region(
+                    name=f"{axis[0]}{idx}",
+                    x=max(0, min(x, image_w - 1)),
+                    y=max(0, min(y, image_h - 1)),
+                    w=max(1, min(w, image_w - x)),
+                    h=max(1, min(h, image_h - y)),
+                )
+            )
+
+        return matched
+
+    def _load_clue_templates(self) -> list[np.ndarray]:
+        if self._clue_templates:
+            return self._clue_templates
+
+        repo_root = Path(__file__).resolve().parents[3]
+        templates_dir = repo_root / "assets" / "templates"
+        if not templates_dir.exists():
+            return []
+
+        candidates = sorted(
+            path
+            for path in templates_dir.glob("*.png")
+            if "clue" in path.stem.lower() and not path.stem.lower().endswith("tmp")
+        )
+        if not candidates:
+            return []
+
+        loaded: list[np.ndarray] = []
+        max_area = 0
+        raw_templates: list[np.ndarray] = []
+        for path in candidates:
+            template = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
+            if template is None:
+                continue
+            h, w = template.shape[:2]
+            if h < 8 or w < 8:
+                continue
+            raw_templates.append(template)
+            max_area = max(max_area, h * w)
+
+        # Keep larger clue-box-like templates, skip tiny glyph-only crops.
+        min_area = int(round(max_area * 0.55)) if max_area > 0 else 0
+        for template in raw_templates:
+            h, w = template.shape[:2]
+            if h * w < min_area:
+                continue
+            loaded.append(template)
+
+        self._clue_templates = loaded
+        return self._clue_templates
+
+    def _load_tile_templates(self) -> list[np.ndarray]:
+        if self._tile_templates:
+            return self._tile_templates
+
+        templates = self._load_templates_by_keyword("tile")
+        self._tile_templates = templates
+        return self._tile_templates
+
+    def _load_anchor_templates(self) -> list[np.ndarray]:
+        if self._anchor_templates:
+            return self._anchor_templates
+
+        templates = self._load_templates_by_keyword("anchor")
+        self._anchor_templates = templates
+        return self._anchor_templates
+
+    def _load_templates_by_keyword(self, keyword: str) -> list[np.ndarray]:
+        repo_root = Path(__file__).resolve().parents[3]
+        templates_dir = repo_root / "assets" / "templates"
+        if not templates_dir.exists():
+            return []
+
+        candidates = sorted(
+            path
+            for path in templates_dir.glob("*.png")
+            if keyword in path.stem.lower() and not path.stem.lower().endswith("tmp")
+        )
+
+        loaded: list[np.ndarray] = []
+        for path in candidates:
+            template = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
+            if template is None:
+                continue
+            h, w = template.shape[:2]
+            if h < 8 or w < 8:
+                continue
+            loaded.append(template)
+        return loaded
+
     def _make_region(
         self,
         name: str,
@@ -310,7 +680,11 @@ def main() -> int:
     result = parser.annotate(args.input_image, args.output_image)
     print(f"Labeled image written to: {args.output_image}")
     for region in result.regions:
-        print(f"- {region.name}: x={region.x}, y={region.y}, w={region.w}, h={region.h}")
+        method = result.region_methods.get(region.name, "unknown")
+        print(
+            f"- {region.name}: x={region.x}, y={region.y}, w={region.w}, h={region.h}, method={method}"
+        )
+    print(f"Method summary: {result.method_summary()}")
     if result.warnings:
         print("Warnings:")
         for warning in result.warnings:

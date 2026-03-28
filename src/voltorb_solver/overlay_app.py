@@ -871,10 +871,11 @@ class OverlayControlWindow(QMainWindow):
         warning_text = ""
         if result.warnings:
             warning_text = f" Warnings: {' | '.join(result.warnings)}"
+        method_text = f" Methods: {result.method_summary()}."
         monitor_text = f" Monitor: {self.state.selected_screen_index + 1}."
         level = "warning" if result.warnings else "success"
         self._set_status(
-            f"Parsed {len(result.regions)} regions from {Path(image_path).name} ({relabel_reason}).{monitor_text}{warning_text}",
+            f"Parsed {len(result.regions)} regions from {Path(image_path).name} ({relabel_reason}).{method_text}{monitor_text}{warning_text}",
             level=level,
         )
 
