@@ -229,6 +229,8 @@ class OverlayControlWindow(QMainWindow):
         self.state = OverlayState()
         self.x11_overlay = X11SafeOverlay(OVERLAY_COLORS)
         self._screens = QGuiApplication.screens()
+        self._cached_regions: list[Region] = []
+        self._last_capture_signature: tuple[str, int | None, int, int, int, int] | None = None
 
         root = QWidget()
         root.setObjectName("RootPanel")
@@ -314,6 +316,9 @@ class OverlayControlWindow(QMainWindow):
         self.save_btn = QPushButton("Save Labeled Screenshot")
         self.save_btn.setObjectName("SecondaryButton")
         self.save_btn.clicked.connect(self.save_labeled)
+        self.relabel_btn = QPushButton("Relabel Regions")
+        self.relabel_btn.setObjectName("SecondaryButton")
+        self.relabel_btn.clicked.connect(self.relabel_regions)
         self.clear_btn = QPushButton("Clear Overlay")
         self.clear_btn.setObjectName("DangerButton")
         self.clear_btn.clicked.connect(self.clear_overlay)
@@ -321,6 +326,7 @@ class OverlayControlWindow(QMainWindow):
         button_row.addWidget(self.target_window_btn)
         button_row.addWidget(self.load_btn)
         button_row.addWidget(self.save_btn)
+        button_row.addWidget(self.relabel_btn)
         button_row.addWidget(self.clear_btn)
         actions_layout.addLayout(button_row)
 
@@ -509,6 +515,8 @@ class OverlayControlWindow(QMainWindow):
         output_path = str(
             Path(gettempdir()) / f"voltorb_overlay_capture_monitor_{self.state.selected_screen_index + 1}.png"
         )
+        capture_signature = self._build_capture_signature()
+        relabel_reason = self._should_relabel_reason(capture_signature)
 
         was_overlay_visible = self.overlay_btn.isChecked()
         if was_overlay_visible:
@@ -536,7 +544,16 @@ class OverlayControlWindow(QMainWindow):
             self._show_error(f"Failed to capture {target_desc}.")
             return
 
-        self._parse_and_apply(output_path)
+        self.state.last_input_path = output_path
+
+        if relabel_reason is None:
+            self.x11_overlay.set_overlay_data(self._cached_regions, pixmap.width(), pixmap.height())
+            self._set_status(
+                f"Reused existing labels for {Path(output_path).name}. Monitor: {self.state.selected_screen_index + 1}.",
+                level="info",
+            )
+        else:
+            self._parse_and_apply(output_path, capture_signature=capture_signature, relabel_reason=relabel_reason)
 
         if was_overlay_visible:
             self.x11_overlay.show()
@@ -655,7 +672,23 @@ class OverlayControlWindow(QMainWindow):
         )
         if not selected:
             return
-        self._parse_and_apply(selected)
+        self._parse_and_apply(
+            selected,
+            capture_signature=None,
+            relabel_reason="manual screenshot load",
+        )
+
+    def relabel_regions(self) -> None:
+        if self.state.last_input_path is None:
+            self._show_error("Capture or load a screenshot first.")
+            return
+
+        capture_signature = self._build_capture_signature()
+        self._parse_and_apply(
+            self.state.last_input_path,
+            capture_signature=capture_signature,
+            relabel_reason="manual relabel requested",
+        )
 
     def save_labeled(self) -> None:
         if self.state.last_input_path is None:
@@ -682,6 +715,8 @@ class OverlayControlWindow(QMainWindow):
     def clear_overlay(self) -> None:
         self.x11_overlay.clear_overlay()
         self.state.last_input_path = None
+        self._cached_regions = []
+        self._last_capture_signature = None
         self._set_status("Overlay cleared.", level="info")
 
     def toggle_overlay(self, checked: bool) -> None:
@@ -759,7 +794,69 @@ class OverlayControlWindow(QMainWindow):
         index = min(max(self.state.selected_screen_index, 0), len(self._screens) - 1)
         return self._screens[index]
 
-    def _parse_and_apply(self, image_path: str) -> None:
+    def _query_window_geometry(self, window_id: int) -> tuple[int, int, int, int] | None:
+        if shutil.which("xwininfo") is None:
+            return None
+
+        try:
+            result = subprocess.run(
+                ["xwininfo", "-id", str(window_id), "-int"],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        except Exception:
+            return None
+
+        if result.returncode != 0:
+            return None
+
+        x_match = re.search(r"Absolute upper-left X:\s+(-?\d+)", result.stdout)
+        y_match = re.search(r"Absolute upper-left Y:\s+(-?\d+)", result.stdout)
+        w_match = re.search(r"Width:\s+(\d+)", result.stdout)
+        h_match = re.search(r"Height:\s+(\d+)", result.stdout)
+        if not (x_match and y_match and w_match and h_match):
+            return None
+        return (
+            int(x_match.group(1)),
+            int(y_match.group(1)),
+            int(w_match.group(1)),
+            int(h_match.group(1)),
+        )
+
+    def _build_capture_signature(self) -> tuple[str, int | None, int, int, int, int] | None:
+        if self.state.target_window_id is not None:
+            geometry = self._query_window_geometry(self.state.target_window_id)
+            if geometry is None:
+                return None
+            x, y, w, h = geometry
+            return ("window", self.state.target_window_id, x, y, w, h)
+
+        screen = self._get_selected_screen()
+        if screen is None:
+            return None
+        geo = screen.geometry()
+        return ("screen", self.state.selected_screen_index, geo.x(), geo.y(), geo.width(), geo.height())
+
+    def _should_relabel_reason(
+        self,
+        capture_signature: tuple[str, int | None, int, int, int, int] | None,
+    ) -> str | None:
+        if not self._cached_regions:
+            return "initial capture"
+        if capture_signature is None:
+            return "capture geometry could not be verified"
+        if self._last_capture_signature != capture_signature:
+            return "capture window geometry changed"
+        return None
+
+    def _parse_and_apply(
+        self,
+        image_path: str,
+        *,
+        capture_signature: tuple[str, int | None, int, int, int, int] | None,
+        relabel_reason: str,
+    ) -> None:
         try:
             result = self.parser.parse(image_path)
         except Exception as exc:
@@ -767,6 +864,8 @@ class OverlayControlWindow(QMainWindow):
             return
 
         self.state.last_input_path = image_path
+        self._cached_regions = list(result.regions)
+        self._last_capture_signature = capture_signature
         self.x11_overlay.set_overlay_data(result.regions, result.image_width, result.image_height)
 
         warning_text = ""
@@ -775,7 +874,7 @@ class OverlayControlWindow(QMainWindow):
         monitor_text = f" Monitor: {self.state.selected_screen_index + 1}."
         level = "warning" if result.warnings else "success"
         self._set_status(
-            f"Parsed {len(result.regions)} regions from {Path(image_path).name}.{monitor_text}{warning_text}",
+            f"Parsed {len(result.regions)} regions from {Path(image_path).name} ({relabel_reason}).{monitor_text}{warning_text}",
             level=level,
         )
 
