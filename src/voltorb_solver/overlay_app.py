@@ -9,6 +9,7 @@ from PySide6.QtGui import QColor, QGuiApplication, QPainter, QPen
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
+    QFrame,
     QFileDialog,
     QHBoxLayout,
     QLabel,
@@ -293,7 +294,7 @@ class OverlayControlWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Voltorb Solver X11 Overlay")
-        self.setMinimumSize(560, 230)
+        self.setMinimumSize(780, 360)
 
         self.parser = ScreenBoardParser()
         self.state = OverlayState()
@@ -301,83 +302,242 @@ class OverlayControlWindow(QMainWindow):
         self._screens = QGuiApplication.screens()
 
         root = QWidget()
+        root.setObjectName("RootPanel")
         self.setCentralWidget(root)
         layout = QVBoxLayout(root)
-        layout.setContentsMargins(14, 14, 14, 14)
-        layout.setSpacing(10)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
+
+        header_card = QFrame()
+        header_card.setObjectName("Card")
+        header_layout = QVBoxLayout(header_card)
+        header_layout.setContentsMargins(14, 12, 14, 12)
+        header_layout.setSpacing(6)
 
         title = QLabel("Voltorb Solver X11 Overlay")
-        title.setStyleSheet("font-size: 20px; font-weight: 700;")
+        title.setObjectName("TitleLabel")
         title.setWordWrap(False)
-        layout.addWidget(title)
+        header_layout.addWidget(title)
 
-        self.status = QLabel("No screenshot parsed yet.")
-        self.status.setStyleSheet("color: #334155;")
-        layout.addWidget(self.status)
+        subtitle = QLabel(
+            "Capture a specific monitor, parse board regions, and render the overlay on that same monitor."
+        )
+        subtitle.setObjectName("SubtitleLabel")
+        subtitle.setWordWrap(True)
+        header_layout.addWidget(subtitle)
+
+        self.status = QLabel()
+        self.status.setObjectName("StatusPill")
+        self.status.setWordWrap(True)
+        header_layout.addWidget(self.status)
+        layout.addWidget(header_card)
+
+        monitor_card = QFrame()
+        monitor_card.setObjectName("Card")
+        monitor_layout = QVBoxLayout(monitor_card)
+        monitor_layout.setContentsMargins(14, 12, 14, 12)
+        monitor_layout.setSpacing(8)
 
         monitor_row = QHBoxLayout()
-        monitor_row.addWidget(QLabel("Capture/Overlay Monitor:"))
+        monitor_row.setSpacing(8)
+        monitor_label = QLabel("Capture/Overlay Monitor")
+        monitor_label.setObjectName("FieldLabel")
+        monitor_row.addWidget(monitor_label)
         self.monitor_combo = QComboBox()
+        self.monitor_combo.setObjectName("MonitorCombo")
         self.monitor_combo.currentIndexChanged.connect(self._on_monitor_changed)
         monitor_row.addWidget(self.monitor_combo)
         self.refresh_monitors_btn = QPushButton("Refresh Monitors")
+        self.refresh_monitors_btn.setObjectName("SecondaryButton")
         self.refresh_monitors_btn.clicked.connect(self._refresh_monitor_list)
         monitor_row.addWidget(self.refresh_monitors_btn)
-        layout.addLayout(monitor_row)
+        monitor_layout.addLayout(monitor_row)
+
+        self.monitor_hint = QLabel("No monitor selected.")
+        self.monitor_hint.setObjectName("HintLabel")
+        self.monitor_hint.setWordWrap(True)
+        monitor_layout.addWidget(self.monitor_hint)
+
+        layout.addWidget(monitor_card)
+
+        actions_card = QFrame()
+        actions_card.setObjectName("Card")
+        actions_layout = QVBoxLayout(actions_card)
+        actions_layout.setContentsMargins(14, 12, 14, 12)
+        actions_layout.setSpacing(8)
 
         button_row = QHBoxLayout()
+        button_row.setSpacing(8)
         self.capture_btn = QPushButton("Capture Screen")
+        self.capture_btn.setObjectName("PrimaryButton")
         self.capture_btn.clicked.connect(self.capture_screen)
         self.load_btn = QPushButton("Load Screenshot...")
+        self.load_btn.setObjectName("SecondaryButton")
         self.load_btn.clicked.connect(self.load_screenshot)
         self.save_btn = QPushButton("Save Labeled Screenshot")
+        self.save_btn.setObjectName("SecondaryButton")
         self.save_btn.clicked.connect(self.save_labeled)
         self.clear_btn = QPushButton("Clear Overlay")
+        self.clear_btn.setObjectName("DangerButton")
         self.clear_btn.clicked.connect(self.clear_overlay)
         button_row.addWidget(self.capture_btn)
         button_row.addWidget(self.load_btn)
         button_row.addWidget(self.save_btn)
         button_row.addWidget(self.clear_btn)
-        layout.addLayout(button_row)
+        actions_layout.addLayout(button_row)
 
-        self.overlay_btn = QPushButton("Show Overlay")
+        self.overlay_btn = QPushButton("Enable Overlay")
+        self.overlay_btn.setObjectName("AccentToggle")
         self.overlay_btn.setCheckable(True)
         self.overlay_btn.toggled.connect(self.toggle_overlay)
-        layout.addWidget(self.overlay_btn)
+        actions_layout.addWidget(self.overlay_btn)
+        layout.addWidget(actions_card)
 
         help_text = QLabel(
-            "Select a monitor, then use Capture/Load to parse a screenshot. Show Overlay will render on"
-            " the selected monitor. This build uses X11-safe overlay windows only."
+            "Tip: Pick monitor first, then capture. Overlay always follows the selected monitor in this X11 build."
         )
+        help_text.setObjectName("HintLabel")
         help_text.setWordWrap(True)
-        help_text.setStyleSheet("color: #475569;")
         layout.addWidget(help_text)
+        layout.addStretch(1)
 
         self._apply_styles()
+        self._set_status("No screenshot parsed yet.", level="info")
         self._refresh_monitor_list()
 
     def _apply_styles(self) -> None:
         self.setStyleSheet(
             """
-            QWidget {
-                background: #f8fafc;
-                color: #0f172a;
+            #RootPanel {
+                background: #eef3f7;
+                color: #12202f;
             }
+
+            #Card {
+                background: #ffffff;
+                border: 1px solid #d7e1ea;
+                border-radius: 12px;
+            }
+
+            #TitleLabel {
+                font-size: 22px;
+                font-weight: 700;
+                color: #0d233a;
+            }
+
+            #SubtitleLabel {
+                font-size: 13px;
+                color: #465c72;
+            }
+
+            #FieldLabel {
+                font-size: 13px;
+                font-weight: 600;
+                color: #1f3b54;
+            }
+
+            #HintLabel {
+                font-size: 12px;
+                color: #5b7288;
+            }
+
+            #StatusPill {
+                border-radius: 8px;
+                border: 1px solid #d1deea;
+                background: #f5f9fc;
+                color: #2f4d66;
+                padding: 8px 10px;
+                font-size: 12px;
+                font-weight: 600;
+            }
+
+            QComboBox#MonitorCombo {
+                min-height: 34px;
+                border: 1px solid #c5d4e1;
+                border-radius: 8px;
+                padding: 5px 8px;
+                background: #ffffff;
+                color: #17324a;
+            }
+
+            QComboBox#MonitorCombo:hover {
+                border-color: #97b0c6;
+            }
+
+            QComboBox#MonitorCombo:focus {
+                border-color: #4f87b8;
+            }
+
             QPushButton {
-                background: #1d4ed8;
+                min-height: 34px;
                 color: #ffffff;
                 border: none;
                 border-radius: 8px;
-                padding: 9px 12px;
+                padding: 7px 12px;
                 font-weight: 600;
             }
-            QPushButton:checked {
-                background: #14532d;
+
+            QPushButton#PrimaryButton {
+                background: #1767a9;
             }
-            QPushButton:hover {
-                background: #1e40af;
+
+            QPushButton#PrimaryButton:hover {
+                background: #0f578f;
+            }
+
+            QPushButton#SecondaryButton {
+                background: #5b7288;
+            }
+
+            QPushButton#SecondaryButton:hover {
+                background: #495f74;
+            }
+
+            QPushButton#DangerButton {
+                background: #b44949;
+            }
+
+            QPushButton#DangerButton:hover {
+                background: #9d3e3e;
+            }
+
+            QPushButton#AccentToggle {
+                background: #1f7d5f;
+            }
+
+            QPushButton#AccentToggle:hover {
+                background: #18684f;
+            }
+
+            QPushButton#AccentToggle:checked {
+                background: #14533f;
             }
             """
+        )
+
+    def _set_status(self, message: str, level: str = "info") -> None:
+        style_map = {
+            "info": ("#f5f9fc", "#d1deea", "#2f4d66"),
+            "success": ("#edf8f1", "#bfe1cd", "#24553a"),
+            "warning": ("#fff8eb", "#efd7a6", "#6f5315"),
+            "error": ("#fdeeee", "#e6b6b6", "#7c2d2d"),
+        }
+        bg, border, fg = style_map.get(level, style_map["info"])
+        self.status.setStyleSheet(
+            f"border-radius: 8px; border: 1px solid {border}; background: {bg}; color: {fg};"
+            "padding: 8px 10px; font-size: 12px; font-weight: 600;"
+        )
+        self.status.setText(message)
+
+    def _update_monitor_hint(self) -> None:
+        screen = self._get_selected_screen()
+        if screen is None:
+            self.monitor_hint.setText("No monitor selected.")
+            return
+
+        geo = screen.geometry()
+        self.monitor_hint.setText(
+            f"Selected monitor geometry: {geo.width()}x{geo.height()} at ({geo.x()}, {geo.y()})."
         )
 
     def capture_screen(self) -> None:
@@ -428,16 +588,16 @@ class OverlayControlWindow(QMainWindow):
 
         self.state.last_output_path = target
         self.state.parse_result = result
-        self.status.setText(f"Saved labeled screenshot: {target}")
+        self._set_status(f"Saved labeled screenshot: {target}", level="success")
 
     def clear_overlay(self) -> None:
         self.x11_overlay.clear_overlay()
         self.state.parse_result = None
         self.state.last_input_path = None
-        self.status.setText("Overlay cleared.")
+        self._set_status("Overlay cleared.", level="info")
 
     def toggle_overlay(self, checked: bool) -> None:
-        self.overlay_btn.setText("Hide Overlay" if checked else "Show Overlay")
+        self.overlay_btn.setText("Disable Overlay" if checked else "Enable Overlay")
         if checked:
             self._show_active_overlay()
         else:
@@ -449,7 +609,7 @@ class OverlayControlWindow(QMainWindow):
             self._show_error("No monitor selected for overlay.")
             self.overlay_btn.blockSignals(True)
             self.overlay_btn.setChecked(False)
-            self.overlay_btn.setText("Show Overlay")
+            self.overlay_btn.setText("Enable Overlay")
             self.overlay_btn.blockSignals(False)
             return
 
@@ -486,6 +646,7 @@ class OverlayControlWindow(QMainWindow):
 
         self.state.selected_screen_index = selected
         self.x11_overlay.set_target_screen(self._screens[selected])
+        self._update_monitor_hint()
 
         if self.overlay_btn.isChecked():
             self._show_active_overlay()
@@ -498,6 +659,7 @@ class OverlayControlWindow(QMainWindow):
         screen = self._get_selected_screen()
         if screen is not None:
             self.x11_overlay.set_target_screen(screen)
+        self._update_monitor_hint()
 
         if self.overlay_btn.isChecked():
             self._show_active_overlay()
@@ -523,11 +685,14 @@ class OverlayControlWindow(QMainWindow):
         if result.warnings:
             warning_text = f" Warnings: {' | '.join(result.warnings)}"
         monitor_text = f" Monitor: {self.state.selected_screen_index + 1}."
-        self.status.setText(
-            f"Parsed {len(result.regions)} regions from {Path(image_path).name}.{monitor_text}{warning_text}"
+        level = "warning" if result.warnings else "success"
+        self._set_status(
+            f"Parsed {len(result.regions)} regions from {Path(image_path).name}.{monitor_text}{warning_text}",
+            level=level,
         )
 
     def _show_error(self, message: str) -> None:
+        self._set_status(message, level="error")
         QMessageBox.critical(self, "Voltorb Solver X11 Overlay", message)
 
 
