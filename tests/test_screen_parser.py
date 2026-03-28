@@ -15,25 +15,38 @@ def test_screen_parser_detects_expected_regions() -> None:
     result = parser.parse(str(sample))
     names = {region.name for region in result.regions}
 
-    assert "game_panel" in names
-    assert "board_grid" in names
-    assert "row_clues" in names
-    assert "col_clues" in names
+    expected_board = {f"({r},{c})" for r in range(5) for c in range(5)}
+    expected_rows = {f"r{r}" for r in range(5)}
+    expected_cols = {f"c{c}" for c in range(5)}
+    expected_names = expected_board | expected_rows | expected_cols
+
+    assert len(names) == 35
+    assert names == expected_names
 
     by_name = result.by_name()
-    panel = by_name["game_panel"]
-    board = by_name["board_grid"]
 
-    assert panel.w > 100
-    assert panel.h > 100
-    assert board.w > 80
-    assert board.h > 80
+    top_left = by_name["(0,0)"]
+    top_right = by_name["(0,4)"]
+    bottom_left = by_name["(4,0)"]
+    r0 = by_name["r0"]
+    r4 = by_name["r4"]
+    c0 = by_name["c0"]
+    c4 = by_name["c4"]
 
-    # Board should be inside game panel bounds.
-    assert panel.x <= board.x <= panel.x + panel.w
-    assert panel.y <= board.y <= panel.y + panel.h
-    assert board.x + board.w <= panel.x + panel.w
-    assert board.y + board.h <= panel.y + panel.h
+    assert top_left.w > 10
+    assert top_left.h > 10
+    assert r0.h > 10
+    assert c0.w > 10
+
+    # Row clues are to the right of the board rows.
+    assert r0.x >= top_right.x + top_right.w
+    assert r0.y <= top_left.y
+    assert r4.y + r4.h >= bottom_left.y + bottom_left.h
+
+    # Column clues are below the board columns.
+    assert c0.y >= bottom_left.y + bottom_left.h
+    assert c0.x <= top_left.x
+    assert c4.x + c4.w >= top_right.x + top_right.w
 
 
 def test_screen_parser_annotation_writes_output(tmp_path: Path) -> None:
@@ -46,4 +59,4 @@ def test_screen_parser_annotation_writes_output(tmp_path: Path) -> None:
 
     assert output.exists()
     assert output.stat().st_size > 0
-    assert len(result.regions) >= 4
+    assert len(result.regions) == 35

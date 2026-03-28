@@ -180,7 +180,7 @@ class ScreenBoardParser:
         panel: tuple[int, int, int, int],
         board: tuple[int, int, int, int],
     ) -> list[Region]:
-        px, py, pw, ph = panel
+        _px, _py, _pw, _ph = panel
         bx, by, bw, bh = board
 
         row_gap = int(round(bw * 0.03))
@@ -195,35 +195,53 @@ class ScreenBoardParser:
         col_y = by + bh + col_gap
         col_w = bw
 
-        header_h = int(round(ph * 0.17))
-        score_h = int(round(ph * 0.24))
-        controls_h = int(round(ph * 0.12))
+        board_cols = self._split_axis(bx, bw, 5)
+        board_rows = self._split_axis(by, bh, 5)
+        row_rows = self._split_axis(row_y, row_h, 5)
+        col_cols = self._split_axis(col_x, col_w, 5)
 
-        regions = [
-            self._make_region("game_panel", px, py, pw, ph, image_w, image_h),
-            self._make_region("header", px, py, pw, header_h, image_w, image_h),
-            self._make_region(
-                "score_area",
-                px,
-                py + header_h,
-                pw,
-                score_h,
-                image_w,
-                image_h,
-            ),
-            self._make_region("board_grid", bx, by, bw, bh, image_w, image_h),
-            self._make_region("row_clues", row_x, row_y, row_w, row_h, image_w, image_h),
-            self._make_region("col_clues", col_x, col_y, col_w, col_h, image_w, image_h),
-            self._make_region(
-                "controls",
-                px,
-                py + ph - controls_h,
-                pw,
-                controls_h,
-                image_w,
-                image_h,
-            ),
-        ]
+        regions: list[Region] = []
+
+        for r_idx, (tile_y, tile_h) in enumerate(board_rows):
+            for c_idx, (tile_x, tile_w) in enumerate(board_cols):
+                regions.append(
+                    self._make_region(
+                        f"({r_idx},{c_idx})",
+                        tile_x,
+                        tile_y,
+                        tile_w,
+                        tile_h,
+                        image_w,
+                        image_h,
+                    )
+                )
+
+        for r_idx, (clue_y, clue_h) in enumerate(row_rows):
+            regions.append(
+                self._make_region(
+                    f"r{r_idx}",
+                    row_x,
+                    clue_y,
+                    row_w,
+                    clue_h,
+                    image_w,
+                    image_h,
+                )
+            )
+
+        for c_idx, (clue_x, clue_w) in enumerate(col_cols):
+            regions.append(
+                self._make_region(
+                    f"c{c_idx}",
+                    clue_x,
+                    col_y,
+                    clue_w,
+                    col_h,
+                    image_w,
+                    image_h,
+                )
+            )
+
         return regions
 
     def _make_region(
@@ -254,6 +272,20 @@ class ScreenBoardParser:
                 continue
             clusters.append([value])
         return [(sum(cluster) / len(cluster), len(cluster)) for cluster in clusters]
+
+    def _split_axis(self, start: int, total: int, count: int) -> list[tuple[int, int]]:
+        if count <= 0:
+            return []
+
+        end = start + max(1, total)
+        edges = [start + int(round(i * (end - start) / count)) for i in range(count + 1)]
+
+        spans: list[tuple[int, int]] = []
+        for idx in range(count):
+            axis_start = edges[idx]
+            axis_end = edges[idx + 1]
+            spans.append((axis_start, max(1, axis_end - axis_start)))
+        return spans
 
     def _label_color(self, idx: int) -> tuple[int, int, int]:
         palette = [

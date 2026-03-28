@@ -9,7 +9,7 @@ Overlay-first MVP implemented:
 - Always-on-top transparent overlay that can draw detected game regions on your desktop.
 - Control window with screen capture and screenshot load actions.
 - Screenshot region parser for Voltorb Flip layouts.
-- Annotated image output with labeled regions (panel, board, clues, header, score area, controls).
+- Annotated image output with per-component labels: board tiles `(0,0)` to `(4,4)`, row clues `r0..r4`, and column clues `c0..c4`.
 
 ## Run
 
