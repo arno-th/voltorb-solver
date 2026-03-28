@@ -49,6 +49,7 @@ class ScreenParseResult:
 
 class ScreenBoardParser:
     """Detects coarse Voltorb Flip regions from a full screenshot."""
+    TILE_TEMPLATE_MIN_SCORE = 0.58
 
     def __init__(self) -> None:
         self._clue_templates: list[np.ndarray] = []
@@ -280,7 +281,7 @@ class ScreenBoardParser:
                 continue
 
             response = cv2.matchTemplate(gray_image, template, cv2.TM_CCOEFF_NORMED)
-            y_idxs, x_idxs = np.where(response >= 0.62)
+            y_idxs, x_idxs = np.where(response >= self.TILE_TEMPLATE_MIN_SCORE)
             for y, x in zip(y_idxs.tolist(), x_idxs.tolist()):
                 cx = x + tw / 2.0
                 cy = y + th / 2.0

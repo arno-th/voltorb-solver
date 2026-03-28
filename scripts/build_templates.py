@@ -27,20 +27,24 @@ def compute_default_size(paths: list[Path]) -> tuple[int, int]:
     return int(median(widths)), int(median(heights))
 
 
-def process_image(src: Path, dst: Path, size: tuple[int, int]) -> None:
+def process_image(src: Path, dst: Path, size: tuple[int, int] | None) -> tuple[int, int]:
     with Image.open(src) as image:
         gray = ImageOps.grayscale(image)
-        # Nearest-neighbor keeps pixel-art edges sharp.
-        resized = gray.resize(size, Image.Resampling.NEAREST)
+        if size is None:
+            output = gray
+        else:
+            # Nearest-neighbor keeps pixel-art edges sharp.
+            output = gray.resize(size, Image.Resampling.NEAREST)
 
     dst.parent.mkdir(parents=True, exist_ok=True)
-    resized.save(dst.with_suffix(".png"), format="PNG")
+    output.save(dst.with_suffix(".png"), format="PNG")
+    return output.size
 
 
 def build_templates(
     input_dir: Path,
     output_dir: Path,
-    size: tuple[int, int],
+    size: tuple[int, int] | None,
     suffix: str,
 ) -> int:
     images = find_images(input_dir)
@@ -49,22 +53,25 @@ def build_templates(
         return 1
 
     print(f"Found {len(images)} raw template image(s)")
-    print(f"Target size: {size[0]}x{size[1]}")
+    if size is None:
+        print("Target size: keep original dimensions")
+    else:
+        print(f"Target size: {size[0]}x{size[1]}")
     print(f"Output directory: {output_dir}")
 
     for src in images:
         rel = src.relative_to(input_dir)
         out_name = f"{rel.stem}{suffix}"
         dst = output_dir / rel.parent / out_name
-        process_image(src, dst, size)
-        print(f"wrote: {dst.with_suffix('.png')}")
+        out_w, out_h = process_image(src, dst, size)
+        print(f"wrote: {dst.with_suffix('.png')} ({out_w}x{out_h})")
 
     return 0
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Convert raw template screenshots to normalized grayscale templates."
+        description="Convert raw template screenshots to grayscale templates."
     )
     parser.add_argument(
         "--input",
@@ -80,6 +87,11 @@ def main() -> int:
     )
     parser.add_argument("--width", type=int, default=0, help="Optional target width.")
     parser.add_argument("--height", type=int, default=0, help="Optional target height.")
+    parser.add_argument(
+        "--resize-to-median",
+        action="store_true",
+        help="Resize all templates to median raw size. By default, original dimensions are preserved.",
+    )
     parser.add_argument(
         "--suffix",
         default="_tpl",
@@ -98,11 +110,13 @@ def main() -> int:
     images = find_images(input_dir)
     if args.width > 0 and args.height > 0:
         target_size = (args.width, args.height)
-    else:
+    elif args.resize_to_median:
         if not images:
             print(f"No images found in: {input_dir}")
             return 1
         target_size = compute_default_size(images)
+    else:
+        target_size = None
 
     return build_templates(input_dir, output_dir, target_size, args.suffix)
 
