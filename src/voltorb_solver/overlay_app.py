@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import re
+import shutil
+import subprocess
 from tempfile import gettempdir
 
 from PySide6.QtCore import Qt, QRect
@@ -29,6 +32,8 @@ class OverlayState:
     last_output_path: str | None = None
     parse_result: ScreenParseResult | None = None
     selected_screen_index: int = 0
+    target_window_id: int | None = None
+    target_window_name: str | None = None
 
 
 OVERLAY_COLORS = [
@@ -358,6 +363,11 @@ class OverlayControlWindow(QMainWindow):
         self.monitor_hint.setWordWrap(True)
         monitor_layout.addWidget(self.monitor_hint)
 
+        self.window_hint = QLabel("Capture target: selected monitor.")
+        self.window_hint.setObjectName("HintLabel")
+        self.window_hint.setWordWrap(True)
+        monitor_layout.addWidget(self.window_hint)
+
         layout.addWidget(monitor_card)
 
         actions_card = QFrame()
@@ -371,6 +381,12 @@ class OverlayControlWindow(QMainWindow):
         self.capture_btn = QPushButton("Capture Screen")
         self.capture_btn.setObjectName("PrimaryButton")
         self.capture_btn.clicked.connect(self.capture_screen)
+        self.pick_window_btn = QPushButton("Pick Target Window")
+        self.pick_window_btn.setObjectName("SecondaryButton")
+        self.pick_window_btn.clicked.connect(self.pick_target_window)
+        self.clear_window_btn = QPushButton("Clear Target Window")
+        self.clear_window_btn.setObjectName("SecondaryButton")
+        self.clear_window_btn.clicked.connect(self.clear_target_window)
         self.load_btn = QPushButton("Load Screenshot...")
         self.load_btn.setObjectName("SecondaryButton")
         self.load_btn.clicked.connect(self.load_screenshot)
@@ -381,6 +397,8 @@ class OverlayControlWindow(QMainWindow):
         self.clear_btn.setObjectName("DangerButton")
         self.clear_btn.clicked.connect(self.clear_overlay)
         button_row.addWidget(self.capture_btn)
+        button_row.addWidget(self.pick_window_btn)
+        button_row.addWidget(self.clear_window_btn)
         button_row.addWidget(self.load_btn)
         button_row.addWidget(self.save_btn)
         button_row.addWidget(self.clear_btn)
@@ -394,7 +412,8 @@ class OverlayControlWindow(QMainWindow):
         layout.addWidget(actions_card)
 
         help_text = QLabel(
-            "Tip: Pick monitor first, then capture. Overlay always follows the selected monitor in this X11 build."
+            "Tip: Pick a target emulator window for reliable repeated captures. If no target window is set,"
+            " capture uses the selected monitor."
         )
         help_text.setObjectName("HintLabel")
         help_text.setWordWrap(True)
@@ -540,20 +559,154 @@ class OverlayControlWindow(QMainWindow):
             f"Selected monitor geometry: {geo.width()}x{geo.height()} at ({geo.x()}, {geo.y()})."
         )
 
-    def capture_screen(self) -> None:
-        screen = self._get_selected_screen()
-        if screen is None:
-            self._show_error("No monitor selected for screen capture.")
+    def _update_window_hint(self) -> None:
+        if self.state.target_window_id is None:
+            self.window_hint.setText("Capture target: selected monitor.")
             return
 
+        name = self.state.target_window_name or "Unnamed window"
+        self.window_hint.setText(
+            f"Capture target window: #{self.state.target_window_id} ({name})."
+        )
+
+    def capture_screen(self) -> None:
         output_path = str(
             Path(gettempdir()) / f"voltorb_overlay_capture_monitor_{self.state.selected_screen_index + 1}.png"
         )
-        pixmap = screen.grabWindow(0)
-        if pixmap.isNull() or not pixmap.save(output_path):
-            self._show_error("Failed to capture the selected monitor.")
+
+        was_overlay_visible = self.overlay_btn.isChecked()
+        if was_overlay_visible:
+            self.x11_overlay.hide()
+
+        if self.state.target_window_id is not None:
+            pixmap = self._capture_window(self.state.target_window_id)
+        else:
+            screen = self._get_selected_screen()
+            if screen is None:
+                if was_overlay_visible:
+                    self.x11_overlay.show()
+                self._show_error("No monitor selected for screen capture.")
+                return
+            pixmap = screen.grabWindow(0)
+
+        if pixmap is None or pixmap.isNull() or not pixmap.save(output_path):
+            if was_overlay_visible:
+                self.x11_overlay.show()
+            target_desc = (
+                f"window #{self.state.target_window_id}"
+                if self.state.target_window_id is not None
+                else "selected monitor"
+            )
+            self._show_error(f"Failed to capture {target_desc}.")
             return
+
         self._parse_and_apply(output_path)
+
+        if was_overlay_visible:
+            self.x11_overlay.show()
+
+    def pick_target_window(self) -> None:
+        if shutil.which("xwininfo") is None:
+            self._show_error("`xwininfo` not found. Install x11-utils to use target window capture.")
+            return
+
+        self._set_status(
+            "Click the emulator window to lock capture target...",
+            level="info",
+        )
+
+        try:
+            result = subprocess.run(
+                ["xwininfo", "-int"],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        except Exception as exc:
+            self._show_error(f"Failed to run xwininfo: {exc}")
+            return
+
+        if result.returncode != 0:
+            self._set_status("Window selection cancelled.", level="warning")
+            return
+
+        output = result.stdout
+        match = re.search(r"Window id:\s+(\d+)\s+\"(.*)\"", output)
+        if not match:
+            self._show_error("Could not parse selected window from xwininfo output.")
+            return
+
+        self.state.target_window_id = int(match.group(1))
+        self.state.target_window_name = match.group(2).strip() or "Unnamed window"
+
+        self._align_monitor_to_target_window()
+        self._update_window_hint()
+        self._set_status(
+            f"Selected target window #{self.state.target_window_id}: {self.state.target_window_name}",
+            level="success",
+        )
+
+    def clear_target_window(self) -> None:
+        self.state.target_window_id = None
+        self.state.target_window_name = None
+        self._update_window_hint()
+        self._set_status("Cleared target window. Capture will use selected monitor.", level="info")
+
+    def _capture_window(self, window_id: int):
+        # Try each screen; one of them should return the target window content.
+        best_pixmap = None
+        best_area = 0
+        for screen in QGuiApplication.screens():
+            pixmap = screen.grabWindow(window_id)
+            if pixmap.isNull():
+                continue
+            area = pixmap.width() * pixmap.height()
+            if area > best_area:
+                best_area = area
+                best_pixmap = pixmap
+
+        if best_pixmap is None:
+            selected_screen = self._get_selected_screen()
+            return selected_screen.grabWindow(0) if selected_screen else None
+        return best_pixmap
+
+    def _align_monitor_to_target_window(self) -> None:
+        if self.state.target_window_id is None or shutil.which("xwininfo") is None:
+            return
+
+        try:
+            result = subprocess.run(
+                ["xwininfo", "-id", str(self.state.target_window_id), "-int"],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        except Exception:
+            return
+
+        if result.returncode != 0:
+            return
+
+        x_match = re.search(r"Absolute upper-left X:\s+(-?\d+)", result.stdout)
+        y_match = re.search(r"Absolute upper-left Y:\s+(-?\d+)", result.stdout)
+        w_match = re.search(r"Width:\s+(\d+)", result.stdout)
+        h_match = re.search(r"Height:\s+(\d+)", result.stdout)
+        if not (x_match and y_match and w_match and h_match):
+            return
+
+        x = int(x_match.group(1))
+        y = int(y_match.group(1))
+        w = int(w_match.group(1))
+        h = int(h_match.group(1))
+        cx = x + w // 2
+        cy = y + h // 2
+
+        for idx, screen in enumerate(self._screens):
+            geo = screen.geometry()
+            if geo.contains(cx, cy):
+                if idx != self.state.selected_screen_index:
+                    self.monitor_combo.setCurrentIndex(idx)
+                return
 
     def load_screenshot(self) -> None:
         selected, _ = QFileDialog.getOpenFileName(
@@ -647,6 +800,7 @@ class OverlayControlWindow(QMainWindow):
         self.state.selected_screen_index = selected
         self.x11_overlay.set_target_screen(self._screens[selected])
         self._update_monitor_hint()
+        self._update_window_hint()
 
         if self.overlay_btn.isChecked():
             self._show_active_overlay()
