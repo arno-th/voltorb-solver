@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import os
 from pathlib import Path
 from tempfile import gettempdir
 
@@ -29,6 +28,17 @@ class OverlayState:
     last_output_path: str | None = None
     parse_result: ScreenParseResult | None = None
     selected_screen_index: int = 0
+
+
+OVERLAY_COLORS = [
+    QColor(15, 188, 249),
+    QColor(255, 158, 0),
+    QColor(32, 201, 151),
+    QColor(255, 99, 132),
+    QColor(153, 102, 255),
+    QColor(255, 205, 86),
+    QColor(0, 200, 83),
+]
 
 
 def _bind_widget_to_screen(widget: QWidget, screen) -> None:
@@ -282,15 +292,12 @@ class X11SafeOverlay:
 class OverlayControlWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("Voltorb Overlay Tool")
+        self.setWindowTitle("Voltorb Solver X11 Overlay")
         self.setMinimumSize(560, 230)
 
         self.parser = ScreenBoardParser()
         self.state = OverlayState()
-        self.overlay = OverlayCanvas()
-        self.x11_overlay = X11SafeOverlay(self.overlay._colors)
-        self._platform_name = (QGuiApplication.platformName() or "").lower()
-        self._x11_safe_mode = self._is_x11_platform()
+        self.x11_overlay = X11SafeOverlay(OVERLAY_COLORS)
         self._screens = QGuiApplication.screens()
 
         root = QWidget()
@@ -299,8 +306,9 @@ class OverlayControlWindow(QMainWindow):
         layout.setContentsMargins(14, 14, 14, 14)
         layout.setSpacing(10)
 
-        title = QLabel("Live Overlay + Screenshot Labeling")
+        title = QLabel("Voltorb Solver X11 Overlay")
         title.setStyleSheet("font-size: 20px; font-weight: 700;")
+        title.setWordWrap(False)
         layout.addWidget(title)
 
         self.status = QLabel("No screenshot parsed yet.")
@@ -337,15 +345,9 @@ class OverlayControlWindow(QMainWindow):
         self.overlay_btn.toggled.connect(self.toggle_overlay)
         layout.addWidget(self.overlay_btn)
 
-        self.mode_btn = QPushButton(
-            "Overlay Mode: X11 Safe" if self._x11_safe_mode else "Overlay Mode: Transparent Canvas"
-        )
-        self.mode_btn.clicked.connect(self.toggle_overlay_mode)
-        layout.addWidget(self.mode_btn)
-
         help_text = QLabel(
             "Select a monitor, then use Capture/Load to parse a screenshot. Show Overlay will render on"
-            " the selected monitor. On i3/X11, use X11 Safe mode if transparent overlays appear black."
+            " the selected monitor. This build uses X11-safe overlay windows only."
         )
         help_text.setWordWrap(True)
         help_text.setStyleSheet("color: #475569;")
@@ -429,7 +431,6 @@ class OverlayControlWindow(QMainWindow):
         self.status.setText(f"Saved labeled screenshot: {target}")
 
     def clear_overlay(self) -> None:
-        self.overlay.clear_overlay()
         self.x11_overlay.clear_overlay()
         self.state.parse_result = None
         self.state.last_input_path = None
@@ -442,16 +443,6 @@ class OverlayControlWindow(QMainWindow):
         else:
             self._hide_all_overlays()
 
-    def toggle_overlay_mode(self) -> None:
-        self._x11_safe_mode = not self._x11_safe_mode
-        self.mode_btn.setText(
-            "Overlay Mode: X11 Safe" if self._x11_safe_mode else "Overlay Mode: Transparent Canvas"
-        )
-
-        if self.overlay_btn.isChecked():
-            self._hide_all_overlays()
-            self._show_active_overlay()
-
     def _show_active_overlay(self) -> None:
         screen = self._get_selected_screen()
         if screen is None:
@@ -462,28 +453,13 @@ class OverlayControlWindow(QMainWindow):
             self.overlay_btn.blockSignals(False)
             return
 
-        self.overlay.set_target_screen(screen)
         self.x11_overlay.set_target_screen(screen)
 
-        if self._x11_safe_mode:
-            self.overlay.hide()
-            self.x11_overlay.show()
-            return
-        self.x11_overlay.hide()
-        _bind_widget_to_screen(self.overlay, screen)
-        self.overlay.setGeometry(screen.availableGeometry())
-        self.overlay.showFullScreen()
-        self.overlay.raise_()
+        # X11-safe mode is the only supported overlay path in this build.
+        self.x11_overlay.show()
 
     def _hide_all_overlays(self) -> None:
-        self.overlay.hide()
         self.x11_overlay.hide()
-
-    def _is_x11_platform(self) -> bool:
-        if "xcb" in self._platform_name:
-            return True
-        session_type = (os.environ.get("XDG_SESSION_TYPE") or "").lower()
-        return session_type == "x11"
 
     def _monitor_label(self, index: int, screen) -> str:
         geo = screen.geometry()
@@ -509,7 +485,6 @@ class OverlayControlWindow(QMainWindow):
         self.monitor_combo.blockSignals(False)
 
         self.state.selected_screen_index = selected
-        self.overlay.set_target_screen(self._screens[selected])
         self.x11_overlay.set_target_screen(self._screens[selected])
 
         if self.overlay_btn.isChecked():
@@ -522,7 +497,6 @@ class OverlayControlWindow(QMainWindow):
 
         screen = self._get_selected_screen()
         if screen is not None:
-            self.overlay.set_target_screen(screen)
             self.x11_overlay.set_target_screen(screen)
 
         if self.overlay_btn.isChecked():
@@ -543,7 +517,6 @@ class OverlayControlWindow(QMainWindow):
 
         self.state.last_input_path = image_path
         self.state.parse_result = result
-        self.overlay.set_overlay_data(result.regions, result.image_width, result.image_height)
         self.x11_overlay.set_overlay_data(result.regions, result.image_width, result.image_height)
 
         warning_text = ""
@@ -555,7 +528,7 @@ class OverlayControlWindow(QMainWindow):
         )
 
     def _show_error(self, message: str) -> None:
-        QMessageBox.critical(self, "Voltorb Overlay", message)
+        QMessageBox.critical(self, "Voltorb Solver X11 Overlay", message)
 
 
 def run_overlay_app() -> int:
