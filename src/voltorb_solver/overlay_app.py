@@ -9,6 +9,7 @@ from PySide6.QtCore import Qt, QRect
 from PySide6.QtGui import QColor, QGuiApplication, QPainter, QPen
 from PySide6.QtWidgets import (
     QApplication,
+    QComboBox,
     QFileDialog,
     QHBoxLayout,
     QLabel,
@@ -27,6 +28,24 @@ class OverlayState:
     last_input_path: str | None = None
     last_output_path: str | None = None
     parse_result: ScreenParseResult | None = None
+    selected_screen_index: int = 0
+
+
+def _bind_widget_to_screen(widget: QWidget, screen) -> None:
+    if screen is None:
+        return
+
+    # Some window managers ignore off-screen geometry unless the toplevel
+    # window is explicitly assigned to a target QScreen.
+    if hasattr(widget, "setScreen"):
+        try:
+            widget.setScreen(screen)  # type: ignore[attr-defined]
+        except Exception:
+            pass
+
+    handle = widget.windowHandle()
+    if handle is not None:
+        handle.setScreen(screen)
 
 
 def _map_image_to_overlay(overlay_w: int, overlay_h: int, image_w: int, image_h: int) -> QRect:
@@ -67,6 +86,7 @@ class OverlayBorderWindow(QWidget):
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.Tool
             | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.X11BypassWindowManagerHint
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self.setStyleSheet(
@@ -74,7 +94,8 @@ class OverlayBorderWindow(QWidget):
             "border: none;"
         )
 
-    def show_for_rect(self, rect: QRect, side: str) -> None:
+    def show_for_rect(self, rect: QRect, side: str, screen=None) -> None:
+        _bind_widget_to_screen(self, screen)
         if side == "top":
             self.setGeometry(rect.x(), rect.y(), rect.width(), self._thickness)
         elif side == "bottom":
@@ -93,6 +114,7 @@ class OverlayLabelWindow(QWidget):
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.Tool
             | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.X11BypassWindowManagerHint
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
 
@@ -113,6 +135,7 @@ class OverlayCanvas(QWidget):
         super().__init__()
         self._regions: list[Region] = []
         self._image_size: tuple[int, int] | None = None
+        self._target_screen = QGuiApplication.primaryScreen()
         self._colors = [
             QColor(15, 188, 249),
             QColor(255, 158, 0),
@@ -132,9 +155,16 @@ class OverlayCanvas(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
 
-        screen = QGuiApplication.primaryScreen()
-        if screen is not None:
-            self.setGeometry(screen.availableGeometry())
+        self._update_geometry_for_target_screen()
+
+    def set_target_screen(self, screen) -> None:
+        self._target_screen = screen
+        self._update_geometry_for_target_screen()
+
+    def _update_geometry_for_target_screen(self) -> None:
+        if self._target_screen is not None:
+            _bind_widget_to_screen(self, self._target_screen)
+            self.setGeometry(self._target_screen.availableGeometry())
 
     def set_overlay_data(self, regions: list[Region], image_w: int, image_h: int) -> None:
         self._regions = list(regions)
@@ -183,6 +213,12 @@ class X11SafeOverlay:
         self._visible = False
         self._regions: list[Region] = []
         self._image_size: tuple[int, int] | None = None
+        self._target_screen = QGuiApplication.primaryScreen()
+
+    def set_target_screen(self, screen) -> None:
+        self._target_screen = screen
+        if self._visible:
+            self._render()
 
     def set_overlay_data(self, regions: list[Region], image_w: int, image_h: int) -> None:
         self._regions = list(regions)
@@ -218,7 +254,7 @@ class X11SafeOverlay:
         if self._image_size is None or not self._regions:
             return
 
-        screen = QGuiApplication.primaryScreen()
+        screen = self._target_screen
         if screen is None:
             return
         geo = screen.availableGeometry()
@@ -231,10 +267,11 @@ class X11SafeOverlay:
             rect = _map_region_rect(region, mapping, *self._image_size)
             for side in ("top", "bottom", "left", "right"):
                 segment = OverlayBorderWindow(color, thickness=self._border_thickness)
-                segment.show_for_rect(rect, side)
+                segment.show_for_rect(rect, side, screen=screen)
                 self._segments.append(segment)
 
             label = OverlayLabelWindow(region.name, color)
+            _bind_widget_to_screen(label, screen)
             label_x = rect.left() + 6
             label_y = max(geo.y() + 8, rect.top() - label.height() - 4)
             label.move(label_x, label_y)
@@ -254,6 +291,7 @@ class OverlayControlWindow(QMainWindow):
         self.x11_overlay = X11SafeOverlay(self.overlay._colors)
         self._platform_name = (QGuiApplication.platformName() or "").lower()
         self._x11_safe_mode = self._is_x11_platform()
+        self._screens = QGuiApplication.screens()
 
         root = QWidget()
         self.setCentralWidget(root)
@@ -268,6 +306,16 @@ class OverlayControlWindow(QMainWindow):
         self.status = QLabel("No screenshot parsed yet.")
         self.status.setStyleSheet("color: #334155;")
         layout.addWidget(self.status)
+
+        monitor_row = QHBoxLayout()
+        monitor_row.addWidget(QLabel("Capture/Overlay Monitor:"))
+        self.monitor_combo = QComboBox()
+        self.monitor_combo.currentIndexChanged.connect(self._on_monitor_changed)
+        monitor_row.addWidget(self.monitor_combo)
+        self.refresh_monitors_btn = QPushButton("Refresh Monitors")
+        self.refresh_monitors_btn.clicked.connect(self._refresh_monitor_list)
+        monitor_row.addWidget(self.refresh_monitors_btn)
+        layout.addLayout(monitor_row)
 
         button_row = QHBoxLayout()
         self.capture_btn = QPushButton("Capture Screen")
@@ -296,14 +344,15 @@ class OverlayControlWindow(QMainWindow):
         layout.addWidget(self.mode_btn)
 
         help_text = QLabel(
-            "Use Capture/Load to parse a screenshot, then enable Show Overlay to draw detected regions"
-            " over your desktop view. On i3/X11, use X11 Safe mode if transparent overlays appear black."
+            "Select a monitor, then use Capture/Load to parse a screenshot. Show Overlay will render on"
+            " the selected monitor. On i3/X11, use X11 Safe mode if transparent overlays appear black."
         )
         help_text.setWordWrap(True)
         help_text.setStyleSheet("color: #475569;")
         layout.addWidget(help_text)
 
         self._apply_styles()
+        self._refresh_monitor_list()
 
     def _apply_styles(self) -> None:
         self.setStyleSheet(
@@ -330,15 +379,17 @@ class OverlayControlWindow(QMainWindow):
         )
 
     def capture_screen(self) -> None:
-        screen = QGuiApplication.primaryScreen()
+        screen = self._get_selected_screen()
         if screen is None:
-            self._show_error("No active display found for screen capture.")
+            self._show_error("No monitor selected for screen capture.")
             return
 
-        output_path = str(Path(gettempdir()) / "voltorb_overlay_capture.png")
+        output_path = str(
+            Path(gettempdir()) / f"voltorb_overlay_capture_monitor_{self.state.selected_screen_index + 1}.png"
+        )
         pixmap = screen.grabWindow(0)
         if pixmap.isNull() or not pixmap.save(output_path):
-            self._show_error("Failed to capture the current screen.")
+            self._show_error("Failed to capture the selected monitor.")
             return
         self._parse_and_apply(output_path)
 
@@ -402,12 +453,27 @@ class OverlayControlWindow(QMainWindow):
             self._show_active_overlay()
 
     def _show_active_overlay(self) -> None:
+        screen = self._get_selected_screen()
+        if screen is None:
+            self._show_error("No monitor selected for overlay.")
+            self.overlay_btn.blockSignals(True)
+            self.overlay_btn.setChecked(False)
+            self.overlay_btn.setText("Show Overlay")
+            self.overlay_btn.blockSignals(False)
+            return
+
+        self.overlay.set_target_screen(screen)
+        self.x11_overlay.set_target_screen(screen)
+
         if self._x11_safe_mode:
             self.overlay.hide()
             self.x11_overlay.show()
             return
         self.x11_overlay.hide()
+        _bind_widget_to_screen(self.overlay, screen)
+        self.overlay.setGeometry(screen.availableGeometry())
         self.overlay.showFullScreen()
+        self.overlay.raise_()
 
     def _hide_all_overlays(self) -> None:
         self.overlay.hide()
@@ -418,6 +484,55 @@ class OverlayControlWindow(QMainWindow):
             return True
         session_type = (os.environ.get("XDG_SESSION_TYPE") or "").lower()
         return session_type == "x11"
+
+    def _monitor_label(self, index: int, screen) -> str:
+        geo = screen.geometry()
+        name = screen.name() or "Unknown"
+        return f"Monitor {index + 1}: {name} ({geo.width()}x{geo.height()} @ {geo.x()},{geo.y()})"
+
+    def _refresh_monitor_list(self) -> None:
+        self._screens = QGuiApplication.screens()
+
+        if not self._screens:
+            self.monitor_combo.clear()
+            self.state.selected_screen_index = 0
+            return
+
+        previous = self.state.selected_screen_index
+        selected = min(previous, len(self._screens) - 1)
+
+        self.monitor_combo.blockSignals(True)
+        self.monitor_combo.clear()
+        for idx, screen in enumerate(self._screens):
+            self.monitor_combo.addItem(self._monitor_label(idx, screen), idx)
+        self.monitor_combo.setCurrentIndex(selected)
+        self.monitor_combo.blockSignals(False)
+
+        self.state.selected_screen_index = selected
+        self.overlay.set_target_screen(self._screens[selected])
+        self.x11_overlay.set_target_screen(self._screens[selected])
+
+        if self.overlay_btn.isChecked():
+            self._show_active_overlay()
+
+    def _on_monitor_changed(self, combo_index: int) -> None:
+        if combo_index < 0:
+            return
+        self.state.selected_screen_index = combo_index
+
+        screen = self._get_selected_screen()
+        if screen is not None:
+            self.overlay.set_target_screen(screen)
+            self.x11_overlay.set_target_screen(screen)
+
+        if self.overlay_btn.isChecked():
+            self._show_active_overlay()
+
+    def _get_selected_screen(self):
+        if not self._screens:
+            return None
+        index = min(max(self.state.selected_screen_index, 0), len(self._screens) - 1)
+        return self._screens[index]
 
     def _parse_and_apply(self, image_path: str) -> None:
         try:
@@ -434,8 +549,9 @@ class OverlayControlWindow(QMainWindow):
         warning_text = ""
         if result.warnings:
             warning_text = f" Warnings: {' | '.join(result.warnings)}"
+        monitor_text = f" Monitor: {self.state.selected_screen_index + 1}."
         self.status.setText(
-            f"Parsed {len(result.regions)} regions from {Path(image_path).name}.{warning_text}"
+            f"Parsed {len(result.regions)} regions from {Path(image_path).name}.{monitor_text}{warning_text}"
         )
 
     def _show_error(self, message: str) -> None:
