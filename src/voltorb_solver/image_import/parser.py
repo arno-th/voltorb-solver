@@ -4,6 +4,7 @@ import os
 import re
 import shutil
 import statistics
+from collections import Counter
 from dataclasses import dataclass, field
 
 from PIL import Image
@@ -132,7 +133,7 @@ class ImageParser:
 
         board_box = self._detect_board_box(cv_img)
         if board_box is None:
-            return [None for _ in range(BOARD_SIZE)], [None for _ in range(BOARD_SIZE)]
+            board_box = self._fallback_board_box(cv_img.shape[1], cv_img.shape[0])
 
         left, top, step, tile_size = board_box
         row_rects, col_rects = self._build_clue_rects(cv_img.shape[1], cv_img.shape[0], left, top, step, tile_size)
@@ -140,6 +141,17 @@ class ImageParser:
         row_pairs = self._parse_clue_rects(cv_img, row_rects)
         col_pairs = self._parse_clue_rects(cv_img, col_rects)
         return row_pairs, col_pairs
+
+    def _fallback_board_box(self, image_w: int, image_h: int) -> tuple[int, int, int, int]:
+        # Heuristic fallback aligned with screen parser defaults.
+        board_w = int(round(image_w * 0.57))
+        board_h = int(round(image_h * 0.42))
+        board_x = int(round(image_w * 0.02))
+        board_y = int(round(image_h * 0.50))
+
+        side = max(20, int(round(min(board_w, board_h) / 6.0)))
+        step = max(24, int(round((min(board_w, board_h) - side) / max(1, BOARD_SIZE - 1))))
+        return board_x, board_y, step, side
 
     def _detect_board_box(self, cv_img: np.ndarray) -> tuple[int, int, int, int] | None:
         if cv2 is None:
@@ -273,6 +285,18 @@ class ImageParser:
         self, cv_img: np.ndarray, rects: list[tuple[int, int, int, int]]
     ) -> list[tuple[int, int] | None]:
         pairs: list[tuple[int, int] | None] = []
+        img_h, img_w = cv_img.shape[:2]
+        # Jitter ROI sampling improves robustness against tiny geometry shifts.
+        sample_offsets = [
+            (0, 0),
+            (-2, 0),
+            (2, 0),
+            (0, -2),
+            (0, 2),
+            (-1, -1),
+            (1, 1),
+        ]
+
         top_token_map = {
             "15": 5,
             "ii": 5,
@@ -295,38 +319,68 @@ class ImageParser:
             "ii": 1,
             "2": 2,
         }
+
         for x, y, w, h in rects:
-            roi = cv_img[y : y + h, x : x + w]
-            if roi.size == 0:
+            candidates: list[tuple[int, int]] = []
+
+            for dx, dy in sample_offsets:
+                sx, sy, sw, sh = self._clip_rect(x + dx, y + dy, w, h, img_w, img_h)
+                roi = cv_img[sy : sy + sh, sx : sx + sw]
+                if roi.size == 0:
+                    continue
+
+                top_token_roi = roi[int(sh * 0.02) : int(sh * 0.42), int(sw * 0.45) : int(sw * 0.95)]
+                bottom_token_roi = roi[int(sh * 0.50) : int(sh * 0.98), int(sw * 0.40) : int(sw * 0.98)]
+                top_token = self._read_pixel_token(top_token_roi)
+                bottom_token = self._read_pixel_token(bottom_token_roi)
+
+                token_total = top_token_map.get(top_token)
+                token_voltorbs = bottom_token_map.get(bottom_token)
+                if token_total is not None and token_voltorbs is not None:
+                    token_pair = (token_voltorbs, token_total)
+                    if self._is_plausible_clue(*token_pair):
+                        candidates.append(token_pair)
+                    continue
+
+                top_roi = roi[max(0, int(sh * 0.02)) : max(1, int(sh * 0.42)), int(sw * 0.05) : int(sw * 0.95)]
+                bottom_roi = roi[int(sh * 0.50) : max(1, int(sh * 0.98)), int(sw * 0.52) : int(sw * 0.98)]
+
+                total = self._ocr_number(top_roi, min_value=0, max_value=15)
+                voltorbs = self._ocr_number(bottom_roi, min_value=0, max_value=5)
+                if total is None:
+                    total = self._ocr_number_pixel_token(top_roi, min_value=0, max_value=15, kind="top")
+                if voltorbs is None:
+                    voltorbs = self._ocr_number_pixel_token(bottom_roi, min_value=0, max_value=5, kind="bottom")
+
+                if total is None or voltorbs is None:
+                    continue
+
+                ocr_pair = (voltorbs, total)
+                if self._is_plausible_clue(*ocr_pair):
+                    candidates.append(ocr_pair)
+
+            if not candidates:
                 pairs.append(None)
                 continue
 
-            top_token_roi = roi[int(h * 0.02) : int(h * 0.42), int(w * 0.45) : int(w * 0.95)]
-            bottom_token_roi = roi[int(h * 0.50) : int(h * 0.98), int(w * 0.40) : int(w * 0.98)]
-            top_token = self._read_pixel_token(top_token_roi)
-            bottom_token = self._read_pixel_token(bottom_token_roi)
-
-            token_total = top_token_map.get(top_token)
-            token_voltorbs = bottom_token_map.get(bottom_token)
-            if token_total is not None and token_voltorbs is not None:
-                pairs.append((token_voltorbs, token_total))
-                continue
-
-            top_roi = roi[max(0, int(h * 0.02)) : max(1, int(h * 0.42)), int(w * 0.05) : int(w * 0.95)]
-            bottom_roi = roi[int(h * 0.50) : max(1, int(h * 0.98)), int(w * 0.52) : int(w * 0.98)]
-
-            total = self._ocr_number(top_roi, min_value=0, max_value=15)
-            voltorbs = self._ocr_number(bottom_roi, min_value=0, max_value=5)
-            if total is None:
-                total = self._ocr_number_pixel_token(top_roi, min_value=0, max_value=15, kind="top")
-            if voltorbs is None:
-                voltorbs = self._ocr_number_pixel_token(bottom_roi, min_value=0, max_value=5, kind="bottom")
-            if total is None or voltorbs is None:
+            votes = Counter(candidates)
+            (winner, count) = max(votes.items(), key=lambda item: item[1])
+            # Require either majority agreement or at least 2 votes for the winner.
+            if count >= 2 or len(votes) == 1:
+                pairs.append(winner)
+            else:
                 pairs.append(None)
-                continue
-            pairs.append((voltorbs, total))
 
         return pairs
+
+    def _is_plausible_clue(self, voltorbs: int, total: int) -> bool:
+        if not (0 <= voltorbs <= BOARD_SIZE and 0 <= total <= 15):
+            return False
+
+        safe_tiles = BOARD_SIZE - voltorbs
+        min_total = safe_tiles  # all non-voltorbs are 1
+        max_total = safe_tiles * 3  # all non-voltorbs are 3
+        return min_total <= total <= max_total
 
     def _read_pixel_token(self, roi: np.ndarray) -> str:
         if pytesseract is None or cv2 is None or roi.size == 0:
