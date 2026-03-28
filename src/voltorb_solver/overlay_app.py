@@ -381,12 +381,9 @@ class OverlayControlWindow(QMainWindow):
         self.capture_btn = QPushButton("Capture Screen")
         self.capture_btn.setObjectName("PrimaryButton")
         self.capture_btn.clicked.connect(self.capture_screen)
-        self.pick_window_btn = QPushButton("Pick Target Window")
-        self.pick_window_btn.setObjectName("SecondaryButton")
-        self.pick_window_btn.clicked.connect(self.pick_target_window)
-        self.clear_window_btn = QPushButton("Clear Target Window")
-        self.clear_window_btn.setObjectName("SecondaryButton")
-        self.clear_window_btn.clicked.connect(self.clear_target_window)
+        self.target_window_btn = QPushButton("Pick Target Window")
+        self.target_window_btn.setObjectName("SecondaryButton")
+        self.target_window_btn.clicked.connect(self._handle_target_window_button)
         self.load_btn = QPushButton("Load Screenshot...")
         self.load_btn.setObjectName("SecondaryButton")
         self.load_btn.clicked.connect(self.load_screenshot)
@@ -397,8 +394,7 @@ class OverlayControlWindow(QMainWindow):
         self.clear_btn.setObjectName("DangerButton")
         self.clear_btn.clicked.connect(self.clear_overlay)
         button_row.addWidget(self.capture_btn)
-        button_row.addWidget(self.pick_window_btn)
-        button_row.addWidget(self.clear_window_btn)
+        button_row.addWidget(self.target_window_btn)
         button_row.addWidget(self.load_btn)
         button_row.addWidget(self.save_btn)
         button_row.addWidget(self.clear_btn)
@@ -421,6 +417,7 @@ class OverlayControlWindow(QMainWindow):
         layout.addStretch(1)
 
         self._apply_styles()
+        self._update_target_window_button()
         self._set_status("No screenshot parsed yet.", level="info")
         self._refresh_monitor_list()
 
@@ -569,6 +566,21 @@ class OverlayControlWindow(QMainWindow):
             f"Capture target window: #{self.state.target_window_id} ({name})."
         )
 
+    def _update_target_window_button(self) -> None:
+        if self.state.target_window_id is None:
+            self.target_window_btn.setText("Pick Target Window")
+            self.target_window_btn.setToolTip("Select an emulator window for direct capture.")
+            return
+
+        self.target_window_btn.setText("Clear Target Window")
+        self.target_window_btn.setToolTip("Clear the selected target window and capture from monitor.")
+
+    def _handle_target_window_button(self) -> None:
+        if self.state.target_window_id is None:
+            self.pick_target_window()
+            return
+        self.clear_target_window()
+
     def capture_screen(self) -> None:
         output_path = str(
             Path(gettempdir()) / f"voltorb_overlay_capture_monitor_{self.state.selected_screen_index + 1}.png"
@@ -641,6 +653,7 @@ class OverlayControlWindow(QMainWindow):
 
         self._align_monitor_to_target_window()
         self._update_window_hint()
+        self._update_target_window_button()
         self._set_status(
             f"Selected target window #{self.state.target_window_id}: {self.state.target_window_name}",
             level="success",
@@ -650,6 +663,7 @@ class OverlayControlWindow(QMainWindow):
         self.state.target_window_id = None
         self.state.target_window_name = None
         self._update_window_hint()
+        self._update_target_window_button()
         self._set_status("Cleared target window. Capture will use selected monitor.", level="info")
 
     def _capture_window(self, window_id: int):
