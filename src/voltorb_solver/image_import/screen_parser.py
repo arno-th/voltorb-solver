@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
+import os
 from pathlib import Path
 import argparse
 
@@ -49,17 +51,34 @@ class ScreenParseResult:
 
 class ScreenBoardParser:
     """Detects coarse Voltorb Flip regions from a full screenshot."""
-    TILE_TEMPLATE_MIN_SCORE = 0.58
+    TILE_TEMPLATE_MIN_SCORE = 0.80
 
-    def __init__(self) -> None:
+    def __init__(self, debug_dir: str | Path | None = None) -> None:
         self._clue_templates: list[np.ndarray] = []
         self._tile_templates: list[np.ndarray] = []
+        self._tile_template_names: list[str] = []
         self._anchor_templates: list[np.ndarray] = []
+        self._anchor_template_names: list[str] = []
+        env_debug = os.environ.get("VOLTORB_PARSER_DEBUG_DIR", "").strip()
+        selected_debug_dir = debug_dir if debug_dir is not None else (env_debug or None)
+        self._debug_dir = Path(selected_debug_dir).expanduser().resolve() if selected_debug_dir else None
+        self._debug_run_dir: Path | None = None
+        env_tile_threshold = os.environ.get("VOLTORB_TILE_TEMPLATE_MIN_SCORE", "").strip()
+        if env_tile_threshold:
+            try:
+                threshold = float(env_tile_threshold)
+                self._tile_template_min_score = max(0.0, min(1.0, threshold))
+            except ValueError:
+                self._tile_template_min_score = self.TILE_TEMPLATE_MIN_SCORE
+        else:
+            self._tile_template_min_score = self.TILE_TEMPLATE_MIN_SCORE
 
     def parse(self, image_path: str) -> ScreenParseResult:
         image = cv2.imread(image_path)
         if image is None:
             raise ValueError(f"Failed to read image: {image_path}")
+
+        self._begin_debug_run(image_path, image)
 
         image_h, image_w = image.shape[:2]
         warnings: list[str] = []
@@ -68,6 +87,11 @@ class ScreenBoardParser:
         if panel is None:
             warnings.append("Could not detect game panel from screenshot; using full image.")
             panel = (0, 0, image_w, image_h)
+        self._debug_log(f"panel={panel}")
+
+        px, py, pw, ph = panel
+        panel_roi = image[py : py + ph, px : px + pw]
+        self._debug_write_image("panel_roi.png", panel_roi)
 
         board_method = "tile-template-grid"
         board = self._detect_board_grid_from_templates(image, panel)
@@ -78,6 +102,7 @@ class ScreenBoardParser:
             warnings.append("Could not detect board grid by tile contours; using panel-relative fallback.")
             board_method = "panel-fallback-grid"
             board = self._fallback_board(panel)
+        self._debug_log(f"board_method={board_method} board={board}")
 
         regions = self._build_regions(image_w, image_h, panel, board)
         regions, row_method, col_method = self._refine_clue_regions_with_templates(
@@ -100,13 +125,18 @@ class ScreenBoardParser:
                 continue
             region_methods[region.name] = "unknown"
 
-        return ScreenParseResult(
+        result = ScreenParseResult(
             image_width=image_w,
             image_height=image_h,
             regions=regions,
             warnings=warnings,
             region_methods=region_methods,
         )
+        self._debug_log(f"method_summary={result.method_summary()}")
+        if warnings:
+            self._debug_log("warnings=" + " | ".join(warnings))
+        self._end_debug_run()
+        return result
 
     def annotate(self, image_path: str, output_path: str) -> ScreenParseResult:
         result = self.parse(image_path)
@@ -228,25 +258,91 @@ class ScreenBoardParser:
         px, py, pw, ph = panel
         roi = image[py : py + ph, px : px + pw]
         if roi.size == 0:
+            self._debug_log("tile_template: empty panel ROI")
             return None
 
         gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-        centers, sides = self._match_tile_centers(gray, tile_templates)
+        self._debug_write_image("tile_match_gray_panel.png", gray)
+        centers, sides, stats = self._match_tile_centers(gray, tile_templates)
+        self._debug_log(
+            "tile_template: "
+            f"templates={stats['template_count']} "
+            f"raw_hits={stats['raw_hit_count']} "
+            f"nms_kept={stats['nms_kept_count']} "
+            f"best_score={stats['best_score']:.4f} "
+            f"threshold={self._tile_template_min_score:.2f}"
+        )
+        per_template = stats.get("per_template", [])
+        if per_template:
+            template_lines = []
+            for info in per_template:
+                template_lines.append(
+                    f"{info['name']}: max={info['max_score']:.4f}, hits={info['hit_count']}"
+                )
+            self._debug_log("tile_template per-template: " + " | ".join(template_lines))
+
+        if stats["draw_overlay"] is not None:
+            self._debug_write_image("tile_match_overlay.png", stats["draw_overlay"])
+
         if len(centers) < 12:
+            self._debug_log("tile_template: failed due to insufficient centers (<12)")
             return None
 
         # Optional anchor can reduce false-positive clusters when available.
         anchor = self._find_anchor(gray)
+        if anchor is not None and stats["draw_overlay"] is not None:
+            ax_i = int(round(anchor["reference_x"]))
+            ay_i = int(round(anchor["reference_y"]))
+            overlay_with_anchor = stats["draw_overlay"].copy()
+            cv2.drawMarker(
+                overlay_with_anchor,
+                (ax_i, ay_i),
+                (255, 255, 0),
+                markerType=cv2.MARKER_CROSS,
+                markerSize=18,
+                thickness=2,
+                line_type=cv2.LINE_AA,
+            )
+            cv2.putText(
+                overlay_with_anchor,
+                f"anchor ({ax_i},{ay_i})",
+                (ax_i + 8, max(16, ay_i - 8)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.45,
+                (255, 255, 0),
+                1,
+                cv2.LINE_AA,
+            )
+            self._debug_write_image("tile_match_overlay_with_anchor.png", overlay_with_anchor)
         if anchor is not None:
-            ax, ay = anchor
-            centers = [center for center in centers if center[0] >= ax - 12 and center[1] >= ay - 12]
+            ax = anchor["reference_x"]
+            ay = anchor["reference_y"]
+            if anchor["corner"] == "top-right":
+                centers = [
+                    center for center in centers if center[0] <= ax + 12 and center[1] >= ay - 12
+                ]
+            else:
+                centers = [
+                    center for center in centers if center[0] >= ax - 12 and center[1] >= ay - 12
+                ]
+            self._debug_log(
+                "tile_template: "
+                f"anchor_corner={anchor['corner']} "
+                f"anchor_ref=({anchor['reference_x']:.1f},{anchor['reference_y']:.1f}) "
+                f"centers_after_anchor_filter={len(centers)}"
+            )
             if len(centers) < 12:
+                self._debug_log("tile_template: failed after anchor filter (<12 centers)")
                 return None
 
         tolerance = max(8, int(round(np.median(sides) * 0.35))) if sides else 10
         x_clusters = self._cluster_axis([x for x, _y in centers], tolerance=tolerance)
         y_clusters = self._cluster_axis([y for _x, y in centers], tolerance=tolerance)
+        self._debug_log(
+            f"tile_template: tolerance={tolerance}, x_clusters={len(x_clusters)}, y_clusters={len(y_clusters)}"
+        )
         if len(x_clusters) < 5 or len(y_clusters) < 5:
+            self._debug_log("tile_template: failed due to insufficient clusters")
             return None
 
         x_clusters = sorted(x_clusters, key=lambda c: c[1], reverse=True)[:5]
@@ -266,22 +362,48 @@ class ScreenBoardParser:
         board_y = int(round(py + y_centers[0] - side / 2))
         board_w = int(round((x_centers[-1] - x_centers[0]) + side))
         board_h = int(round((y_centers[-1] - y_centers[0]) + side))
+        self._debug_log(
+            f"tile_template: success board_local=({board_x - px},{board_y - py},{board_w},{board_h}) side={side}"
+        )
         return board_x, board_y, board_w, board_h
 
     def _match_tile_centers(
         self,
         gray_image: np.ndarray,
         tile_templates: list[np.ndarray],
-    ) -> tuple[list[tuple[float, float]], list[int]]:
+    ) -> tuple[list[tuple[float, float]], list[int], dict[str, object]]:
         points: list[tuple[float, float, int, float]] = []
+        template_maxima: list[float] = []
+        per_template: list[dict[str, object]] = []
 
-        for template in tile_templates:
+        for idx, template in enumerate(tile_templates):
+            template_name = (
+                self._tile_template_names[idx] if idx < len(self._tile_template_names) else f"template_{idx}"
+            )
             th, tw = template.shape[:2]
             if tw > gray_image.shape[1] or th > gray_image.shape[0]:
+                template_maxima.append(-1.0)
+                per_template.append(
+                    {
+                        "name": template_name,
+                        "max_score": -1.0,
+                        "hit_count": 0,
+                    }
+                )
                 continue
 
             response = cv2.matchTemplate(gray_image, template, cv2.TM_CCOEFF_NORMED)
-            y_idxs, x_idxs = np.where(response >= self.TILE_TEMPLATE_MIN_SCORE)
+            _min_val, max_val, _min_loc, _max_loc = cv2.minMaxLoc(response)
+            template_maxima.append(float(max_val))
+            y_idxs, x_idxs = np.where(response >= self._tile_template_min_score)
+            hit_count = len(y_idxs)
+            per_template.append(
+                {
+                    "name": template_name,
+                    "max_score": float(max_val),
+                    "hit_count": int(hit_count),
+                }
+            )
             for y, x in zip(y_idxs.tolist(), x_idxs.tolist()):
                 cx = x + tw / 2.0
                 cy = y + th / 2.0
@@ -289,7 +411,15 @@ class ScreenBoardParser:
                 points.append((cx, cy, int(round((tw + th) / 2.0)), score))
 
         if not points:
-            return [], []
+            return [], [], {
+                "template_count": len(tile_templates),
+                "template_maxima": template_maxima,
+                "per_template": per_template,
+                "raw_hit_count": 0,
+                "nms_kept_count": 0,
+                "best_score": max(template_maxima) if template_maxima else -1.0,
+                "draw_overlay": None,
+            }
 
         # Non-maximum suppression by center distance keeps strongest nearby response.
         points.sort(key=lambda item: item[3], reverse=True)
@@ -302,17 +432,47 @@ class ScreenBoardParser:
 
         centers = [(cx, cy) for cx, cy, _side in kept]
         sides = [side for _cx, _cy, side in kept]
-        return centers, sides
 
-    def _find_anchor(self, gray_image: np.ndarray) -> tuple[float, float] | None:
+        overlay = cv2.cvtColor(gray_image, cv2.COLOR_GRAY2BGR)
+        for cx, cy, _side, _score in points[:5000]:
+            cv2.circle(overlay, (int(round(cx)), int(round(cy))), 1, (0, 0, 255), -1)
+        for cx, cy, side in kept:
+            cv2.circle(overlay, (int(round(cx)), int(round(cy))), max(2, int(round(side * 0.12))), (0, 255, 0), 1)
+
+        best_score = max(score for _cx, _cy, _side, score in points)
+        return centers, sides, {
+            "template_count": len(tile_templates),
+            "template_maxima": template_maxima,
+            "per_template": per_template,
+            "raw_hit_count": len(points),
+            "nms_kept_count": len(kept),
+            "best_score": float(best_score),
+            "draw_overlay": overlay,
+        }
+
+    def _find_anchor(self, gray_image: np.ndarray) -> dict[str, float | str] | None:
         anchors = self._load_anchor_templates()
         if not anchors:
             return None
 
         best_score = -1.0
-        best_center: tuple[float, float] | None = None
+        best_data: dict[str, float | str] | None = None
 
-        for anchor in anchors:
+        for idx, anchor in enumerate(anchors):
+            template_name = (
+                self._anchor_template_names[idx]
+                if idx < len(self._anchor_template_names)
+                else f"anchor_{idx}.png"
+            )
+            name_lower = template_name.lower()
+            is_top_right = (
+                "top_right" in name_lower
+                or "top-right" in name_lower
+                or "_tr_" in name_lower
+                or name_lower.startswith("tr_")
+                or name_lower.endswith("_tr.png")
+                or "anchor_tr" in name_lower
+            )
             ah, aw = anchor.shape[:2]
             if aw > gray_image.shape[1] or ah > gray_image.shape[0]:
                 continue
@@ -321,11 +481,27 @@ class ScreenBoardParser:
             _min_val, max_val, _min_loc, max_loc = cv2.minMaxLoc(response)
             if max_val > best_score:
                 best_score = float(max_val)
-                best_center = (max_loc[0] + aw / 2.0, max_loc[1] + ah / 2.0)
+                top_left_x = float(max_loc[0])
+                top_left_y = float(max_loc[1])
+                if is_top_right:
+                    reference_x = top_left_x + float(aw)
+                    corner = "top-right"
+                else:
+                    reference_x = top_left_x
+                    corner = "top-left"
+                best_data = {
+                    "top_left_x": top_left_x,
+                    "top_left_y": top_left_y,
+                    "reference_x": reference_x,
+                    "reference_y": top_left_y,
+                    "corner": corner,
+                    "template_name": template_name,
+                }
 
-        if best_center is None or best_score < 0.52:
+        if best_data is None or best_score < 0.52:
             return None
-        return best_center
+        best_data["score"] = best_score
+        return best_data
 
     def _fallback_board(self, panel: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
         px, py, pw, ph = panel
@@ -580,31 +756,64 @@ class ScreenBoardParser:
         if self._tile_templates:
             return self._tile_templates
 
-        templates = self._load_templates_by_keyword("tile")
+        templates, names = self._load_templates_by_keyword("tile")
         self._tile_templates = templates
+        self._tile_template_names = names
         return self._tile_templates
 
     def _load_anchor_templates(self) -> list[np.ndarray]:
         if self._anchor_templates:
             return self._anchor_templates
 
-        templates = self._load_templates_by_keyword("anchor")
+        templates, names = self._load_templates_by_keyword("anchor")
+        preferred_templates: list[np.ndarray] = []
+        preferred_names: list[str] = []
+        fallback_templates: list[np.ndarray] = []
+        fallback_names: list[str] = []
+
+        for template, name in zip(templates, names):
+            name_lower = name.lower()
+            is_top_right = (
+                "top_right" in name_lower
+                or "top-right" in name_lower
+                or "_tr_" in name_lower
+                or name_lower.startswith("tr_")
+                or name_lower.endswith("_tr.png")
+                or "anchor_tr" in name_lower
+            )
+            if is_top_right:
+                preferred_templates.append(template)
+                preferred_names.append(name)
+            else:
+                fallback_templates.append(template)
+                fallback_names.append(name)
+
+        if preferred_templates:
+            self._anchor_templates = preferred_templates
+            self._anchor_template_names = preferred_names
+            return self._anchor_templates
+
         self._anchor_templates = templates
+        self._anchor_template_names = names
         return self._anchor_templates
 
-    def _load_templates_by_keyword(self, keyword: str) -> list[np.ndarray]:
+    def _load_templates_by_keyword(self, keyword: str) -> tuple[list[np.ndarray], list[str]]:
         repo_root = Path(__file__).resolve().parents[3]
         templates_dir = repo_root / "assets" / "templates"
         if not templates_dir.exists():
-            return []
+            return [], []
 
         candidates = sorted(
             path
             for path in templates_dir.glob("*.png")
-            if keyword in path.stem.lower() and not path.stem.lower().endswith("tmp")
+            if keyword in path.stem.lower()
+            and not path.stem.lower().endswith("tmp")
+            and not path.stem.lower().startswith("test_")
+            and "_test" not in path.stem.lower()
         )
 
         loaded: list[np.ndarray] = []
+        names: list[str] = []
         for path in candidates:
             template = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
             if template is None:
@@ -613,7 +822,37 @@ class ScreenBoardParser:
             if h < 8 or w < 8:
                 continue
             loaded.append(template)
-        return loaded
+            names.append(path.name)
+        return loaded, names
+
+    def _begin_debug_run(self, image_path: str, image: np.ndarray) -> None:
+        if self._debug_dir is None:
+            self._debug_run_dir = None
+            return
+
+        run_name = f"{Path(image_path).stem}_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
+        run_dir = self._debug_dir / run_name
+        run_dir.mkdir(parents=True, exist_ok=True)
+        self._debug_run_dir = run_dir
+
+        self._debug_log(f"input={image_path}")
+        self._debug_log(f"image_shape={image.shape[1]}x{image.shape[0]}")
+        self._debug_write_image("input.png", image)
+
+    def _end_debug_run(self) -> None:
+        self._debug_run_dir = None
+
+    def _debug_log(self, message: str) -> None:
+        if self._debug_run_dir is None:
+            return
+        log_path = self._debug_run_dir / "debug.log"
+        with log_path.open("a", encoding="utf-8") as fh:
+            fh.write(message + "\n")
+
+    def _debug_write_image(self, name: str, image: np.ndarray) -> None:
+        if self._debug_run_dir is None:
+            return
+        cv2.imwrite(str(self._debug_run_dir / name), image)
 
     def _make_region(
         self,
