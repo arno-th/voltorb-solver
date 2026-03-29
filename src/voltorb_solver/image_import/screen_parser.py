@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+import itertools
 import os
 from pathlib import Path
 import argparse
@@ -234,8 +235,8 @@ class ScreenBoardParser:
         if len(x_clusters) < 5 or len(y_clusters) < 5:
             return None
 
-        x_clusters = sorted(x_clusters, key=lambda c: c[1], reverse=True)[:5]
-        y_clusters = sorted(y_clusters, key=lambda c: c[1], reverse=True)[:5]
+        x_clusters = self._select_grid_clusters(x_clusters, expected=5)
+        y_clusters = self._select_grid_clusters(y_clusters, expected=5)
         x_centers = sorted(cluster[0] for cluster in x_clusters)
         y_centers = sorted(cluster[0] for cluster in y_clusters)
 
@@ -270,7 +271,10 @@ class ScreenBoardParser:
             f"raw_hits={stats['raw_hit_count']} "
             f"nms_kept={stats['nms_kept_count']} "
             f"best_score={stats['best_score']:.4f} "
-            f"threshold={self._tile_template_min_score:.2f}"
+            f"strict_threshold={stats.get('strict_threshold', self._tile_template_min_score):.2f} "
+            f"relaxed_threshold={stats.get('relaxed_threshold', self._tile_template_min_score):.2f} "
+            f"relaxed_hits={stats.get('relaxed_hit_count', 0)} "
+            f"relaxed_used={stats.get('used_relaxed_fallback', False)}"
         )
         per_template = stats.get("per_template", [])
         if per_template:
@@ -318,22 +322,30 @@ class ScreenBoardParser:
             ax = anchor["reference_x"]
             ay = anchor["reference_y"]
             if anchor["corner"] == "top-right":
-                centers = [
+                filtered_centers = [
                     center for center in centers if center[0] <= ax + 12 and center[1] >= ay - 12
                 ]
             else:
-                centers = [
+                filtered_centers = [
                     center for center in centers if center[0] >= ax - 12 and center[1] >= ay - 12
                 ]
-            self._debug_log(
-                "tile_template: "
-                f"anchor_corner={anchor['corner']} "
-                f"anchor_ref=({anchor['reference_x']:.1f},{anchor['reference_y']:.1f}) "
-                f"centers_after_anchor_filter={len(centers)}"
-            )
-            if len(centers) < 12:
-                self._debug_log("tile_template: failed after anchor filter (<12 centers)")
-                return None
+            min_centers_after_filter = max(25, int(round(len(centers) * 0.60)))
+            if len(filtered_centers) >= min_centers_after_filter:
+                centers = filtered_centers
+                self._debug_log(
+                    "tile_template: "
+                    f"anchor_corner={anchor['corner']} "
+                    f"anchor_ref=({anchor['reference_x']:.1f},{anchor['reference_y']:.1f}) "
+                    f"centers_after_anchor_filter={len(centers)}"
+                )
+            else:
+                self._debug_log(
+                    "tile_template: "
+                    f"anchor_corner={anchor['corner']} "
+                    f"anchor_ref=({anchor['reference_x']:.1f},{anchor['reference_y']:.1f}) "
+                    f"ignored_anchor_filter_kept={len(filtered_centers)} "
+                    f"required={min_centers_after_filter}"
+                )
 
         tolerance = max(8, int(round(np.median(sides) * 0.35))) if sides else 10
         x_clusters = self._cluster_axis([x for x, _y in centers], tolerance=tolerance)
@@ -345,8 +357,8 @@ class ScreenBoardParser:
             self._debug_log("tile_template: failed due to insufficient clusters")
             return None
 
-        x_clusters = sorted(x_clusters, key=lambda c: c[1], reverse=True)[:5]
-        y_clusters = sorted(y_clusters, key=lambda c: c[1], reverse=True)[:5]
+        x_clusters = self._select_grid_clusters(x_clusters, expected=5)
+        y_clusters = self._select_grid_clusters(y_clusters, expected=5)
         x_centers = sorted(cluster[0] for cluster in x_clusters)
         y_centers = sorted(cluster[0] for cluster in y_clusters)
 
@@ -373,8 +385,11 @@ class ScreenBoardParser:
         tile_templates: list[np.ndarray],
     ) -> tuple[list[tuple[float, float]], list[int], dict[str, object]]:
         points: list[tuple[float, float, int, float]] = []
+        relaxed_points: list[tuple[float, float, int, float]] = []
         template_maxima: list[float] = []
         per_template: list[dict[str, object]] = []
+        strict_threshold = self._tile_template_min_score
+        relaxed_threshold = max(0.68, strict_threshold - 0.08)
 
         for idx, template in enumerate(tile_templates):
             template_name = (
@@ -395,7 +410,7 @@ class ScreenBoardParser:
             response = cv2.matchTemplate(gray_image, template, cv2.TM_CCOEFF_NORMED)
             _min_val, max_val, _min_loc, _max_loc = cv2.minMaxLoc(response)
             template_maxima.append(float(max_val))
-            y_idxs, x_idxs = np.where(response >= self._tile_template_min_score)
+            y_idxs, x_idxs = np.where(response >= strict_threshold)
             hit_count = len(y_idxs)
             per_template.append(
                 {
@@ -410,6 +425,16 @@ class ScreenBoardParser:
                 score = float(response[y, x])
                 points.append((cx, cy, int(round((tw + th) / 2.0)), score))
 
+            if relaxed_threshold < strict_threshold:
+                ry_idxs, rx_idxs = np.where(response >= relaxed_threshold)
+                for y, x in zip(ry_idxs.tolist(), rx_idxs.tolist()):
+                    score = float(response[y, x])
+                    if score >= strict_threshold:
+                        continue
+                    cx = x + tw / 2.0
+                    cy = y + th / 2.0
+                    relaxed_points.append((cx, cy, int(round((tw + th) / 2.0)), score))
+
         if not points:
             return [], [], {
                 "template_count": len(tile_templates),
@@ -423,12 +448,48 @@ class ScreenBoardParser:
 
         # Non-maximum suppression by center distance keeps strongest nearby response.
         points.sort(key=lambda item: item[3], reverse=True)
-        kept: list[tuple[float, float, int]] = []
         min_sep = max(8.0, np.median([point[2] for point in points]) * 0.42)
-        for cx, cy, side, _score in points:
-            if any(abs(cx - kx) <= min_sep and abs(cy - ky) <= min_sep for kx, ky, _ks in kept):
-                continue
-            kept.append((cx, cy, side))
+
+        def _nms(source_points: list[tuple[float, float, int, float]]) -> list[tuple[float, float, int]]:
+            selected: list[tuple[float, float, int]] = []
+            for cx, cy, side, _score in source_points:
+                if any(abs(cx - kx) <= min_sep and abs(cy - ky) <= min_sep for kx, ky, _ks in selected):
+                    continue
+                selected.append((cx, cy, side))
+            return selected
+
+        def _grid_score(candidate: list[tuple[float, float, int]]) -> tuple[int, int, int, int]:
+            if not candidate:
+                return (0, -10, -10, 0)
+            cand_centers = [(cx, cy) for cx, cy, _ in candidate]
+            cand_sides = [side for _cx, _cy, side in candidate]
+            tolerance = max(8, int(round(np.median(cand_sides) * 0.35))) if cand_sides else 10
+            x_clusters = self._cluster_axis([x for x, _y in cand_centers], tolerance=tolerance)
+            y_clusters = self._cluster_axis([y for _x, y in cand_centers], tolerance=tolerance)
+            x_count = len(x_clusters)
+            y_count = len(y_clusters)
+            score_primary = min(x_count, 5) + min(y_count, 5)
+            score_shape = -abs(x_count - 5) - abs(y_count - 5)
+            # Prefer denser candidates as a final tie-breaker.
+            return (score_primary, score_shape, min(len(candidate), 40), -max(0, len(candidate) - 40))
+
+        strict_kept = _nms(points)
+        used_relaxed_fallback = False
+        if relaxed_points:
+            merged_points = points + relaxed_points
+            merged_points.sort(key=lambda item: item[3], reverse=True)
+            relaxed_kept = _nms(merged_points)
+
+            strict_score = _grid_score(strict_kept)
+            relaxed_score = _grid_score(relaxed_kept)
+            if relaxed_score > strict_score:
+                kept = relaxed_kept
+                points = merged_points
+                used_relaxed_fallback = True
+            else:
+                kept = strict_kept
+        else:
+            kept = strict_kept
 
         centers = [(cx, cy) for cx, cy, _side in kept]
         sides = [side for _cx, _cy, side in kept]
@@ -447,6 +508,10 @@ class ScreenBoardParser:
             "raw_hit_count": len(points),
             "nms_kept_count": len(kept),
             "best_score": float(best_score),
+            "strict_threshold": float(strict_threshold),
+            "relaxed_threshold": float(relaxed_threshold),
+            "relaxed_hit_count": len(relaxed_points),
+            "used_relaxed_fallback": used_relaxed_fallback,
             "draw_overlay": overlay,
         }
 
@@ -882,6 +947,44 @@ class ScreenBoardParser:
                 continue
             clusters.append([value])
         return [(sum(cluster) / len(cluster), len(cluster)) for cluster in clusters]
+
+    def _select_grid_clusters(
+        self,
+        clusters: list[tuple[float, int]],
+        *,
+        expected: int,
+    ) -> list[tuple[float, int]]:
+        if len(clusters) <= expected:
+            return sorted(clusters, key=lambda item: item[0])
+
+        best_subset: list[tuple[float, int]] | None = None
+        best_key: tuple[float, float, float] | None = None
+
+        for subset in itertools.combinations(clusters, expected):
+            ordered = sorted(subset, key=lambda item: item[0])
+            centers = [item[0] for item in ordered]
+            counts = [item[1] for item in ordered]
+            steps = [centers[idx + 1] - centers[idx] for idx in range(expected - 1)]
+            if any(step <= 0 for step in steps):
+                continue
+
+            median_step = float(np.median(steps))
+            if median_step <= 0:
+                continue
+            # Prefer regular spacing first, then stronger support and larger span.
+            spacing_mad = float(np.median([abs(step - median_step) for step in steps]))
+            spacing_norm = spacing_mad / median_step
+            support = float(sum(counts))
+            span = centers[-1] - centers[0]
+            key = (spacing_norm, -support, -span)
+
+            if best_key is None or key < best_key:
+                best_key = key
+                best_subset = ordered
+
+        if best_subset is not None:
+            return best_subset
+        return sorted(clusters, key=lambda item: item[1], reverse=True)[:expected]
 
     def _split_axis(self, start: int, total: int, count: int) -> list[tuple[int, int]]:
         if count <= 0:
