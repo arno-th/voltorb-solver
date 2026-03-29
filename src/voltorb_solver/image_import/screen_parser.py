@@ -53,6 +53,7 @@ class ScreenParseResult:
 class ScreenBoardParser:
     """Detects coarse Voltorb Flip regions from a full screenshot."""
     TILE_TEMPLATE_MIN_SCORE = 0.80
+    CLUE_TEMPLATE_MIN_SCORE = 0.52
 
     def __init__(self, debug_dir: str | Path | None = None) -> None:
         self._clue_templates: list[np.ndarray] = []
@@ -598,35 +599,70 @@ class ScreenBoardParser:
         _px, _py, _pw, _ph = panel
         bx, by, bw, bh = board
 
-        row_gap = int(round(bw * 0.03))
-        row_w = int(round(bw * 0.26))
-        row_x = bx + bw + row_gap
-
-        col_gap = int(round(bh * 0.03))
-        col_h = int(round(bh * 0.21))
-        col_y = by + bh + col_gap
-
         grid_layout = self._grid_layout
         board_cols: list[tuple[int, int]]
         board_rows: list[tuple[int, int]]
         row_rows: list[tuple[int, int]]
         col_cols: list[tuple[int, int]]
+        row_x: int
+        row_w: int
+        col_y: int
+        col_h: int
 
         if grid_layout is not None:
             x_centers = [float(v) for v in grid_layout.get("x_centers", [])]
             y_centers = [float(v) for v in grid_layout.get("y_centers", [])]
             tile_side = int(grid_layout.get("tile_side", 0))
             if len(x_centers) == 5 and len(y_centers) == 5 and tile_side > 0:
+                step_x = self._estimate_grid_step(x_centers, tile_side)
+                step_y = self._estimate_grid_step(y_centers, tile_side)
+                clue_side = int(round(max(18.0, min(min(step_x, step_y) * 0.78, tile_side * 1.05))))
+                col_clue_w = int(round(clue_side + max(4.0, step_x * 0.12)))
+                col_clue_h = int(round(clue_side + max(4.0, step_y * 0.14)))
+                row_gap = int(round(step_x * 0.30))
+                col_gap = int(round(step_y * 0.30))
+                row_align_shift = int(round(step_y * 0.07))
+                col_right_shift = int(round(step_x * 0.03))
+                col_up_shift = int(round(step_y * 0.08))
+
                 board_cols = [(int(round(cx - tile_side / 2.0)), tile_side) for cx in x_centers]
                 board_rows = [(int(round(cy - tile_side / 2.0)), tile_side) for cy in y_centers]
-                row_rows = list(board_rows)
-                col_cols = list(board_cols)
+
+                row_x = int(round(bx + bw + row_gap))
+                row_w = clue_side
+                col_y = int(round(by + bh + col_gap - col_up_shift))
+                col_h = col_clue_h
+
+                row_rows = [
+                    (int(round(cy - clue_side / 2.0 - row_align_shift)), clue_side)
+                    for cy in y_centers
+                ]
+                col_cols = [
+                    (int(round(cx - col_clue_w / 2.0 + col_right_shift)), col_clue_w)
+                    for cx in x_centers
+                ]
             else:
+                row_gap = int(round(bw * 0.03))
+                row_w = int(round(bw * 0.26))
+                row_x = bx + bw + row_gap
+
+                col_gap = int(round(bh * 0.03))
+                col_h = int(round(bh * 0.21))
+                col_y = by + bh + col_gap
+
                 board_cols = self._split_axis(bx, bw, 5)
                 board_rows = self._split_axis(by, bh, 5)
                 row_rows = self._split_axis(by, bh, 5)
                 col_cols = self._split_axis(bx, bw, 5)
         else:
+            row_gap = int(round(bw * 0.03))
+            row_w = int(round(bw * 0.26))
+            row_x = bx + bw + row_gap
+
+            col_gap = int(round(bh * 0.03))
+            col_h = int(round(bh * 0.21))
+            col_y = by + bh + col_gap
+
             board_cols = self._split_axis(bx, bw, 5)
             board_rows = self._split_axis(by, bh, 5)
             row_rows = self._split_axis(by, bh, 5)
@@ -703,30 +739,43 @@ class ScreenBoardParser:
         row_matches = self._match_clue_regions(gray, expected_rows, templates, axis="row")
         col_matches = self._match_clue_regions(gray, expected_cols, templates, axis="col")
 
-        if row_matches is None or col_matches is None:
-            warnings.append("Template matching for clue boxes was low confidence; using heuristic clue regions.")
-            return regions, "heuristic-clue", "heuristic-clue"
+        row_method = "heuristic-clue"
+        col_method = "heuristic-clue"
 
-        bx, by, bw, bh = board
-        board_right = bx + bw
-        board_bottom = by + bh
-
-        # Reject obvious false matches that cross onto the board area.
-        if any(match.x < board_right for match in row_matches):
-            warnings.append("Template row clue matches overlapped board area; using heuristic row clues.")
-            row_matches = expected_rows
-            row_method = "heuristic-clue"
+        if row_matches is None:
+            warnings.append("Template row clue matching was low confidence; using grid-aligned row clues.")
+            accepted_rows = expected_rows
         else:
-            row_method = "template-clue"
-        if any(match.y < board_bottom for match in col_matches):
-            warnings.append("Template column clue matches overlapped board area; using heuristic column clues.")
-            col_matches = expected_cols
-            col_method = "heuristic-clue"
-        else:
-            col_method = "template-clue"
+            accepted_rows = self._accept_template_clue_matches(
+                expected_rows,
+                row_matches,
+                board,
+                axis="row",
+                warnings=warnings,
+            )
+            if accepted_rows is not None:
+                row_method = "template-clue"
+            else:
+                accepted_rows = expected_rows
 
-        row_matches = sorted(row_matches, key=lambda region: region.y)
-        col_matches = sorted(col_matches, key=lambda region: region.x)
+        if col_matches is None:
+            warnings.append("Template column clue matching was low confidence; using grid-aligned column clues.")
+            accepted_cols = expected_cols
+        else:
+            accepted_cols = self._accept_template_clue_matches(
+                expected_cols,
+                col_matches,
+                board,
+                axis="col",
+                warnings=warnings,
+            )
+            if accepted_cols is not None:
+                col_method = "template-clue"
+            else:
+                accepted_cols = expected_cols
+
+        row_matches = sorted(accepted_rows, key=lambda region: region.y)
+        col_matches = sorted(accepted_cols, key=lambda region: region.x)
 
         merged: list[Region] = []
         for region in regions:
@@ -741,6 +790,85 @@ class ScreenBoardParser:
             merged.append(region)
 
         return merged, row_method, col_method
+
+    def _accept_template_clue_matches(
+        self,
+        expected_regions: list[Region],
+        candidate_regions: list[Region],
+        board: tuple[int, int, int, int],
+        *,
+        axis: str,
+        warnings: list[str],
+    ) -> list[Region] | None:
+        if len(expected_regions) != len(candidate_regions):
+            warnings.append(
+                f"Rejected template {axis} clue matches due to count mismatch; using grid-aligned {axis} clues."
+            )
+            return None
+
+        sort_key = (lambda region: region.y) if axis == "row" else (lambda region: region.x)
+        expected_sorted = sorted(expected_regions, key=sort_key)
+        candidates_sorted = sorted(candidate_regions, key=sort_key)
+
+        bx, by, bw, bh = board
+        board_right = bx + bw
+        board_bottom = by + bh
+
+        accepted: list[Region] = []
+        for idx, (expected, candidate) in enumerate(zip(expected_sorted, candidates_sorted)):
+            exp_cx = expected.x + expected.w / 2.0
+            exp_cy = expected.y + expected.h / 2.0
+            cand_cx = candidate.x + candidate.w / 2.0
+            cand_cy = candidate.y + candidate.h / 2.0
+
+            if axis == "row":
+                primary_delta = abs(cand_cy - exp_cy)
+                secondary_delta = abs(cand_cx - exp_cx)
+                primary_tol = max(4.0, expected.h * 0.40)
+                secondary_tol = max(8.0, expected.w * 0.85)
+                if candidate.x < board_right - 2:
+                    warnings.append(
+                        "Rejected template row clue matches that crossed into board area; using grid-aligned row clues."
+                    )
+                    return None
+            else:
+                primary_delta = abs(cand_cx - exp_cx)
+                secondary_delta = abs(cand_cy - exp_cy)
+                primary_tol = max(4.0, expected.w * 0.40)
+                secondary_tol = max(8.0, expected.h * 0.85)
+                if candidate.y < board_bottom - 2:
+                    warnings.append(
+                        "Rejected template column clue matches that crossed into board area; using grid-aligned column clues."
+                    )
+                    return None
+
+            width_delta = abs(candidate.w - expected.w)
+            height_delta = abs(candidate.h - expected.h)
+            width_tol = max(6.0, expected.w * 0.60)
+            height_tol = max(6.0, expected.h * 0.60)
+
+            if (
+                primary_delta > primary_tol
+                or secondary_delta > secondary_tol
+                or width_delta > width_tol
+                or height_delta > height_tol
+            ):
+                warnings.append(
+                    f"Rejected template {axis} clue matches due to large offset/scale drift; using grid-aligned {axis} clues."
+                )
+                return None
+
+            accepted.append(
+                Region(
+                    name=f"{axis[0]}{idx}",
+                    x=candidate.x,
+                    y=candidate.y,
+                    w=candidate.w,
+                    h=candidate.h,
+                )
+            )
+
+        return accepted
 
     def _match_clue_regions(
         self,
@@ -789,7 +917,7 @@ class ScreenBoardParser:
                     best_rect = (sx + max_loc[0], sy + max_loc[1], tw, th)
 
             # Minimum confidence tuned to avoid replacing decent heuristic boxes with noise.
-            if best_rect is None or best_score < 0.40:
+            if best_rect is None or best_score < self.CLUE_TEMPLATE_MIN_SCORE:
                 return None
 
             x, y, w, h = best_rect
@@ -804,6 +932,17 @@ class ScreenBoardParser:
             )
 
         return matched
+
+    def _estimate_grid_step(self, centers: list[float], fallback: int) -> float:
+        if len(centers) < 2:
+            return float(max(1, fallback))
+
+        ordered = sorted(centers)
+        diffs = [ordered[idx + 1] - ordered[idx] for idx in range(len(ordered) - 1)]
+        positive = [diff for diff in diffs if diff > 1.0]
+        if not positive:
+            return float(max(1, fallback))
+        return float(np.median(positive))
 
     def _load_clue_templates(self) -> list[np.ndarray]:
         if self._clue_templates:
