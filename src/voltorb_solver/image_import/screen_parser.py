@@ -60,6 +60,7 @@ class ScreenBoardParser:
         self._tile_template_names: list[str] = []
         self._anchor_templates: list[np.ndarray] = []
         self._anchor_template_names: list[str] = []
+        self._grid_layout: dict[str, object] | None = None
         env_debug = os.environ.get("VOLTORB_PARSER_DEBUG_DIR", "").strip()
         selected_debug_dir = debug_dir if debug_dir is not None else (env_debug or None)
         self._debug_dir = Path(selected_debug_dir).expanduser().resolve() if selected_debug_dir else None
@@ -79,6 +80,7 @@ class ScreenBoardParser:
         if image is None:
             raise ValueError(f"Failed to read image: {image_path}")
 
+        self._grid_layout = None
         self._begin_debug_run(image_path, image)
 
         image_h, image_w = image.shape[:2]
@@ -241,6 +243,11 @@ class ScreenBoardParser:
         y_centers = sorted(cluster[0] for cluster in y_clusters)
 
         side = int(round(np.median([item[2] for item in boxes])))
+        self._grid_layout = {
+            "x_centers": [px + center for center in x_centers],
+            "y_centers": [py + center for center in y_centers],
+            "tile_side": int(side),
+        }
         board_x = int(round(px + x_centers[0] - side / 2))
         board_y = int(round(py + y_centers[0] - side / 2))
         board_w = int(round((x_centers[-1] - x_centers[0]) + side))
@@ -370,6 +377,11 @@ class ScreenBoardParser:
         else:
             side = int(round(min(pw, ph) * 0.16))
 
+        self._grid_layout = {
+            "x_centers": [px + center for center in x_centers],
+            "y_centers": [py + center for center in y_centers],
+            "tile_side": int(side),
+        }
         board_x = int(round(px + x_centers[0] - side / 2))
         board_y = int(round(py + y_centers[0] - side / 2))
         board_w = int(round((x_centers[-1] - x_centers[0]) + side))
@@ -588,20 +600,37 @@ class ScreenBoardParser:
 
         row_gap = int(round(bw * 0.03))
         row_w = int(round(bw * 0.26))
-        row_h = bh
         row_x = bx + bw + row_gap
-        row_y = by
 
         col_gap = int(round(bh * 0.03))
         col_h = int(round(bh * 0.21))
-        col_x = bx
         col_y = by + bh + col_gap
-        col_w = bw
 
-        board_cols = self._split_axis(bx, bw, 5)
-        board_rows = self._split_axis(by, bh, 5)
-        row_rows = self._split_axis(row_y, row_h, 5)
-        col_cols = self._split_axis(col_x, col_w, 5)
+        grid_layout = self._grid_layout
+        board_cols: list[tuple[int, int]]
+        board_rows: list[tuple[int, int]]
+        row_rows: list[tuple[int, int]]
+        col_cols: list[tuple[int, int]]
+
+        if grid_layout is not None:
+            x_centers = [float(v) for v in grid_layout.get("x_centers", [])]
+            y_centers = [float(v) for v in grid_layout.get("y_centers", [])]
+            tile_side = int(grid_layout.get("tile_side", 0))
+            if len(x_centers) == 5 and len(y_centers) == 5 and tile_side > 0:
+                board_cols = [(int(round(cx - tile_side / 2.0)), tile_side) for cx in x_centers]
+                board_rows = [(int(round(cy - tile_side / 2.0)), tile_side) for cy in y_centers]
+                row_rows = list(board_rows)
+                col_cols = list(board_cols)
+            else:
+                board_cols = self._split_axis(bx, bw, 5)
+                board_rows = self._split_axis(by, bh, 5)
+                row_rows = self._split_axis(by, bh, 5)
+                col_cols = self._split_axis(bx, bw, 5)
+        else:
+            board_cols = self._split_axis(bx, bw, 5)
+            board_rows = self._split_axis(by, bh, 5)
+            row_rows = self._split_axis(by, bh, 5)
+            col_cols = self._split_axis(bx, bw, 5)
 
         regions: list[Region] = []
 

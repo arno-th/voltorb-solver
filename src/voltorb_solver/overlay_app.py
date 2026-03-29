@@ -154,6 +154,7 @@ class X11SafeOverlay:
         self._regions: list[Region] = []
         self._image_size: tuple[int, int] | None = None
         self._target_screen = QGuiApplication.primaryScreen()
+        self._mapping_rect: QRect | None = None
 
     def set_target_screen(self, screen) -> None:
         self._target_screen = screen
@@ -166,9 +167,15 @@ class X11SafeOverlay:
         if self._visible:
             self._render()
 
+    def set_mapping_rect(self, rect: QRect | None) -> None:
+        self._mapping_rect = QRect(rect) if rect is not None else None
+        if self._visible:
+            self._render()
+
     def clear_overlay(self) -> None:
         self._regions = []
         self._image_size = None
+        self._mapping_rect = None
         self._hide_all_windows()
 
     def show(self) -> None:
@@ -197,10 +204,16 @@ class X11SafeOverlay:
         screen = self._target_screen
         if screen is None:
             return
-        geo = screen.availableGeometry()
-        mapping = _map_image_to_overlay(geo.width(), geo.height(), *self._image_size)
-        # Translate from screen-local to absolute coordinates.
-        mapping.translate(geo.x(), geo.y())
+        # Use full screen geometry so overlay coordinates match screen capture space.
+        # availableGeometry() excludes bars/panels (e.g. i3 bar) and introduces offsets.
+        if self._mapping_rect is not None:
+            mapping = QRect(self._mapping_rect)
+        else:
+            geo = screen.geometry()
+            mapping = _map_image_to_overlay(geo.width(), geo.height(), *self._image_size)
+            # Translate from screen-local to absolute coordinates.
+            mapping.translate(geo.x(), geo.y())
+        geo = screen.geometry()
 
         for idx, region in enumerate(self._regions):
             color = self._colors[idx % len(self._colors)]
@@ -547,6 +560,7 @@ class OverlayControlWindow(QMainWindow):
         self.state.last_input_path = output_path
 
         if relabel_reason is None:
+            self.x11_overlay.set_mapping_rect(self._mapping_rect_for_signature(capture_signature))
             self.x11_overlay.set_overlay_data(self._cached_regions, pixmap.width(), pixmap.height())
             self._set_status(
                 f"Reused existing labels for {Path(output_path).name}. Monitor: {self.state.selected_screen_index + 1}.",
@@ -866,6 +880,7 @@ class OverlayControlWindow(QMainWindow):
         self.state.last_input_path = image_path
         self._cached_regions = list(result.regions)
         self._last_capture_signature = capture_signature
+        self.x11_overlay.set_mapping_rect(self._mapping_rect_for_signature(capture_signature))
         self.x11_overlay.set_overlay_data(result.regions, result.image_width, result.image_height)
 
         warning_text = ""
@@ -882,6 +897,17 @@ class OverlayControlWindow(QMainWindow):
     def _show_error(self, message: str) -> None:
         self._set_status(message, level="error")
         QMessageBox.critical(self, "Voltorb Solver X11 Overlay", message)
+
+    def _mapping_rect_for_signature(
+        self,
+        capture_signature: tuple[str, int | None, int, int, int, int] | None,
+    ) -> QRect | None:
+        if capture_signature is None:
+            return None
+        _kind, _id, x, y, w, h = capture_signature
+        if w <= 0 or h <= 0:
+            return None
+        return QRect(x, y, w, h)
 
 
 def run_overlay_app() -> int:
