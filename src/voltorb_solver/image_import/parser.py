@@ -80,7 +80,12 @@ class ImageParser:
         if img_h <= 0 or img_w <= 0:
             return None
 
-        pair = self._parse_clue_rects(cv_img, [(0, 0, img_w, img_h)])[0]
+        pair = self._parse_clue_rects(
+            cv_img,
+            [(0, 0, img_w, img_h)],
+            sample_offsets=[(0, 0), (-1, 0), (1, 0)],
+            fast_ocr=True,
+        )[0]
         return pair
 
     def parse_image(self, image_path: str, crop_rect: tuple[int, int, int, int]) -> ParseResult:
@@ -333,20 +338,25 @@ class ImageParser:
         return x, y, min(w, max_w), min(h, max_h)
 
     def _parse_clue_rects(
-        self, cv_img: np.ndarray, rects: list[tuple[int, int, int, int]]
+        self,
+        cv_img: np.ndarray,
+        rects: list[tuple[int, int, int, int]],
+        sample_offsets: list[tuple[int, int]] | None = None,
+        fast_ocr: bool = False,
     ) -> list[tuple[int, int] | None]:
         pairs: list[tuple[int, int] | None] = []
         img_h, img_w = cv_img.shape[:2]
         # Jitter ROI sampling improves robustness against tiny geometry shifts.
-        sample_offsets = [
-            (0, 0),
-            (-2, 0),
-            (2, 0),
-            (0, -2),
-            (0, 2),
-            (-1, -1),
-            (1, 1),
-        ]
+        if sample_offsets is None:
+            sample_offsets = [
+                (0, 0),
+                (-2, 0),
+                (2, 0),
+                (0, -2),
+                (0, 2),
+                (-1, -1),
+                (1, 1),
+            ]
 
         top_token_map = {
             "15": 5,
@@ -396,8 +406,8 @@ class ImageParser:
                 top_roi = roi[max(0, int(sh * 0.02)) : max(1, int(sh * 0.42)), int(sw * 0.05) : int(sw * 0.95)]
                 bottom_roi = roi[int(sh * 0.50) : max(1, int(sh * 0.98)), int(sw * 0.52) : int(sw * 0.98)]
 
-                total = self._ocr_number(top_roi, min_value=0, max_value=15)
-                voltorbs = self._ocr_number(bottom_roi, min_value=0, max_value=5)
+                total = self._ocr_number(top_roi, min_value=0, max_value=15, fast=fast_ocr)
+                voltorbs = self._ocr_number(bottom_roi, min_value=0, max_value=5, fast=fast_ocr)
                 if total is None:
                     total = self._ocr_number_pixel_token(top_roi, min_value=0, max_value=15, kind="top")
                 if voltorbs is None:
@@ -446,7 +456,7 @@ class ImageParser:
             return ""
         return re.sub(r"[^A-Za-z0-9]", "", text).lower()
 
-    def _ocr_number(self, roi: np.ndarray, min_value: int, max_value: int) -> int | None:
+    def _ocr_number(self, roi: np.ndarray, min_value: int, max_value: int, fast: bool = False) -> int | None:
         if pytesseract is None or cv2 is None or roi.size == 0:
             return None
 
@@ -454,11 +464,17 @@ class ImageParser:
         enlarged = cv2.resize(gray, None, fx=3.0, fy=3.0, interpolation=cv2.INTER_CUBIC)
 
         nearest = cv2.resize(gray, None, fx=6.0, fy=6.0, interpolation=cv2.INTER_NEAREST)
-        variants = [
-            nearest,
-            cv2.threshold(nearest, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1],
-            cv2.threshold(nearest, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1],
-        ]
+        if fast:
+            variants = [
+                nearest,
+                cv2.threshold(nearest, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1],
+            ]
+        else:
+            variants = [
+                nearest,
+                cv2.threshold(nearest, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1],
+                cv2.threshold(nearest, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1],
+            ]
 
         char_map = {
             "O": 0,
@@ -478,7 +494,7 @@ class ImageParser:
         }
 
         config_base = "--oem 3 -c tessedit_char_whitelist=0123456789"
-        psm_modes = (10, 7)
+        psm_modes = (10,) if fast else (10, 7)
         candidate_scores: dict[int, int] = {}
         for variant in variants:
             for psm in psm_modes:
@@ -581,6 +597,10 @@ class ImageParser:
         if pytesseract is None:
             return False
 
+        cached = getattr(self, "_tesseract_runtime_ready", None)
+        if cached is not None:
+            return bool(cached)
+
         configured_cmd = getattr(pytesseract.pytesseract, "tesseract_cmd", "tesseract")
         candidates: list[str] = []
 
@@ -619,8 +639,10 @@ class ImageParser:
                 pytesseract.get_tesseract_version()
             except Exception:
                 continue
+            self._tesseract_runtime_ready = True
             return True
 
+        self._tesseract_runtime_ready = False
         return False
 
     def _extract_numeric_tokens(self, data: dict) -> list[int]:
