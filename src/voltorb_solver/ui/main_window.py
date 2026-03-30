@@ -108,12 +108,15 @@ class MainWindow(QMainWindow):
         self.reset_btn = QPushButton("Reset")
         self.undo_btn = QPushButton("Undo")
         self.import_btn = QPushButton("Import Image")
+        self.parse_single_clue_btn = QPushButton("Parse Single Clue")
         self.reset_btn.clicked.connect(self._reset)
         self.undo_btn.clicked.connect(self._undo)
         self.import_btn.clicked.connect(self._import_image)
+        self.parse_single_clue_btn.clicked.connect(self._parse_single_clue)
         actions.addWidget(self.reset_btn)
         actions.addWidget(self.undo_btn)
         actions.addWidget(self.import_btn)
+        actions.addWidget(self.parse_single_clue_btn)
         left.addLayout(actions)
 
         middle.addWidget(QLabel("Row Clues (Voltorbs, Sum)"))
@@ -371,3 +374,29 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Import Warnings", "\n".join(parse_result.warnings))
         else:
             QMessageBox.information(self, "Import", "Image import complete.")
+
+    def _parse_single_clue(self) -> None:
+        image_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Choose Clue Screenshot",
+            "",
+            "Images (*.png *.jpg *.jpeg *.bmp)",
+        )
+        if not image_path:
+            return
+
+        pair = self.parser.parse_clue_box(image_path)
+        if pair is None:
+            QMessageBox.warning(
+                self,
+                "Parse Single Clue",
+                "Could not confidently parse this clue box. Try a tighter crop and good contrast.",
+            )
+            return
+
+        voltorbs, total = pair
+        QMessageBox.information(
+            self,
+            "Parse Single Clue",
+            f"Parsed clue: voltorbs={voltorbs}, total={total}",
+        )

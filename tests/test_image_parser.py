@@ -2,6 +2,7 @@ from pathlib import Path
 import types
 
 from PIL import Image
+import numpy as np
 import pytest
 
 import voltorb_solver.image_import.parser as parser_module
@@ -68,3 +69,75 @@ def test_parse_known_voltorb_screenshot_when_ocr_available() -> None:
     assert len(parsed_cols) == 5
     assert all(0 <= bombs <= 5 and 0 <= total <= 15 for bombs, total in parsed_rows)
     assert all(0 <= bombs <= 5 and 0 <= total <= 15 for bombs, total in parsed_cols)
+
+
+def test_parse_clue_box_returns_pair_with_stubbed_parser(monkeypatch, tmp_path: Path) -> None:
+    image_path = tmp_path / "clue.png"
+    Image.new("RGB", (64, 64), color="white").save(image_path)
+
+    parser = ImageParser()
+
+    fake_cv2 = types.SimpleNamespace()
+    fake_cv2.COLOR_RGB2BGR = 1
+    fake_cv2.cvtColor = lambda img, _code: img
+
+    fake_pytesseract = types.SimpleNamespace()
+
+    monkeypatch.setattr(parser_module, "cv2", fake_cv2)
+    monkeypatch.setattr(parser_module, "pytesseract", fake_pytesseract)
+    monkeypatch.setattr(parser, "_configure_tesseract_runtime", lambda: True)
+    monkeypatch.setattr(parser, "_parse_clue_rects", lambda _img, _rects: [(2, 10)])
+
+    result = parser.parse_clue_box(str(image_path))
+
+    assert result == (2, 10)
+
+
+def test_parse_clue_box_returns_none_when_unreadable(monkeypatch) -> None:
+    parser = ImageParser()
+
+    fake_cv2 = types.SimpleNamespace()
+    fake_pytesseract = types.SimpleNamespace()
+
+    monkeypatch.setattr(parser_module, "cv2", fake_cv2)
+    monkeypatch.setattr(parser_module, "pytesseract", fake_pytesseract)
+    monkeypatch.setattr(parser, "_configure_tesseract_runtime", lambda: True)
+    monkeypatch.setattr(parser, "_parse_clue_rects", lambda _img, _rects: [None])
+
+    arr = np.zeros((32, 32, 3), dtype=np.uint8)
+    result = parser.parse_clue_box(arr)
+
+    assert result is None
+
+
+def test_parse_clue_from_screenshot_crops_and_parses(monkeypatch, tmp_path: Path) -> None:
+    image_path = tmp_path / "screen.png"
+    Image.new("RGB", (120, 80), color="white").save(image_path)
+
+    parser = ImageParser()
+    fake_cv2 = types.SimpleNamespace()
+    fake_cv2.imread = lambda _path: np.zeros((80, 120, 3), dtype=np.uint8)
+    monkeypatch.setattr(parser_module, "cv2", fake_cv2)
+
+    captured_shapes: list[tuple[int, int]] = []
+
+    def fake_parse_clue_box(crop):
+        captured_shapes.append((crop.shape[1], crop.shape[0]))
+        return (1, 7)
+
+    monkeypatch.setattr(parser, "parse_clue_box", fake_parse_clue_box)
+
+    result = parser.parse_clue_from_screenshot(str(image_path), (10, 20, 30, 25))
+
+    assert result == (1, 7)
+    assert captured_shapes == [(30, 25)]
+
+
+def test_parse_clue_from_screenshot_rejects_invalid_box(tmp_path: Path) -> None:
+    image_path = tmp_path / "screen.png"
+    Image.new("RGB", (50, 50), color="white").save(image_path)
+
+    parser = ImageParser()
+    result = parser.parse_clue_from_screenshot(str(image_path), (0, 0, 0, 10))
+
+    assert result is None

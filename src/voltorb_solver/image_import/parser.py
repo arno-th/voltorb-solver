@@ -32,6 +32,57 @@ class ParseResult:
 
 
 class ImageParser:
+    def parse_clue_from_screenshot(
+        self,
+        image_path: str,
+        clue_box: tuple[int, int, int, int],
+    ) -> tuple[int, int] | None:
+        x, y, w, h = clue_box
+        if w <= 0 or h <= 0:
+            return None
+
+        if cv2 is None:
+            return None
+
+        image = cv2.imread(image_path)
+        if image is None:
+            return None
+
+        img_h, img_w = image.shape[:2]
+        x0 = max(0, min(x, img_w - 1))
+        y0 = max(0, min(y, img_h - 1))
+        x1 = max(x0 + 1, min(x + w, img_w))
+        y1 = max(y0 + 1, min(y + h, img_h))
+        crop = image[y0:y1, x0:x1]
+        if crop.size == 0:
+            return None
+
+        return self.parse_clue_box(crop)
+
+    def parse_clue_box(self, image: str | np.ndarray) -> tuple[int, int] | None:
+        if cv2 is None or pytesseract is None:
+            return None
+
+        if not self._configure_tesseract_runtime():
+            return None
+
+        if isinstance(image, str):
+            pil_image = Image.open(image).convert("RGB")
+            cv_img = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
+        else:
+            cv_img = image.copy()
+            if cv_img.ndim == 2:
+                cv_img = np.dstack([cv_img, cv_img, cv_img])
+            elif cv_img.ndim != 3 or cv_img.shape[2] < 3:
+                return None
+
+        img_h, img_w = cv_img.shape[:2]
+        if img_h <= 0 or img_w <= 0:
+            return None
+
+        pair = self._parse_clue_rects(cv_img, [(0, 0, img_w, img_h)])[0]
+        return pair
+
     def parse_image(self, image_path: str, crop_rect: tuple[int, int, int, int]) -> ParseResult:
         result = ParseResult()
         img = Image.open(image_path)

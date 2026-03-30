@@ -18,11 +18,13 @@ from PySide6.QtWidgets import (
     QLabel,
     QMainWindow,
     QMessageBox,
+    QInputDialog,
     QPushButton,
     QVBoxLayout,
     QWidget,
 )
 
+from voltorb_solver.image_import.parser import ImageParser
 from voltorb_solver.image_import.screen_parser import Region, ScreenBoardParser
 
 
@@ -239,6 +241,7 @@ class OverlayControlWindow(QMainWindow):
         self.setMinimumSize(780, 360)
 
         self.parser = ScreenBoardParser()
+        self.clue_parser = ImageParser()
         self.state = OverlayState()
         self.x11_overlay = X11SafeOverlay(OVERLAY_COLORS)
         self._screens = QGuiApplication.screens()
@@ -326,6 +329,9 @@ class OverlayControlWindow(QMainWindow):
         self.load_btn = QPushButton("Load Screenshot...")
         self.load_btn.setObjectName("SecondaryButton")
         self.load_btn.clicked.connect(self.load_screenshot)
+        self.parse_clue_btn = QPushButton("Parse Single Clue")
+        self.parse_clue_btn.setObjectName("SecondaryButton")
+        self.parse_clue_btn.clicked.connect(self.parse_single_clue)
         self.save_btn = QPushButton("Save Labeled Screenshot")
         self.save_btn.setObjectName("SecondaryButton")
         self.save_btn.clicked.connect(self.save_labeled)
@@ -338,6 +344,7 @@ class OverlayControlWindow(QMainWindow):
         button_row.addWidget(self.capture_btn)
         button_row.addWidget(self.target_window_btn)
         button_row.addWidget(self.load_btn)
+        button_row.addWidget(self.parse_clue_btn)
         button_row.addWidget(self.save_btn)
         button_row.addWidget(self.relabel_btn)
         button_row.addWidget(self.clear_btn)
@@ -690,6 +697,59 @@ class OverlayControlWindow(QMainWindow):
             selected,
             capture_signature=None,
             relabel_reason="manual screenshot load",
+        )
+
+    def parse_single_clue(self) -> None:
+        if self.state.last_input_path is None:
+            self._show_error("Capture or load a screenshot first.")
+            return
+
+        clue_regions = [
+            region
+            for region in self._cached_regions
+            if (region.name.startswith("r") or region.name.startswith("c")) and region.name[1:].isdigit()
+        ]
+        if not clue_regions:
+            self._show_error("No clue regions available. Capture/relabel the screenshot first.")
+            return
+
+        ordered_names = sorted(
+            (region.name for region in clue_regions),
+            key=lambda name: (name[0], int(name[1:])),
+        )
+        selected_name, ok = QInputDialog.getItem(
+            self,
+            "Choose Clue Box",
+            "Select clue region:",
+            ordered_names,
+            0,
+            False,
+        )
+        if not ok:
+            return
+
+        selected_region = next((region for region in clue_regions if region.name == selected_name), None)
+        if selected_region is None:
+            self._show_error(f"Selected clue region `{selected_name}` is not available.")
+            return
+
+        pair = self.clue_parser.parse_clue_from_screenshot(
+            self.state.last_input_path,
+            (selected_region.x, selected_region.y, selected_region.w, selected_region.h),
+        )
+        if pair is None:
+            QMessageBox.warning(
+                self,
+                "Parse Single Clue",
+                "Could not confidently parse this clue box. Try a tighter crop and good contrast.",
+            )
+            return
+
+        voltorbs, total = pair
+        QMessageBox.information(
+            self,
+            "Parse Single Clue",
+            f"Parsed {selected_region.name}: voltorbs={voltorbs}, total={total}",
         )
 
     def relabel_regions(self) -> None:
