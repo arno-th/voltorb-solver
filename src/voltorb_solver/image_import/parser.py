@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 import re
 import shutil
 import statistics
@@ -32,11 +33,11 @@ class ParseResult:
 
 
 class ImageParser:
-    def parse_clue_from_screenshot(
+    def extract_clue_crop(
         self,
         image_path: str,
         clue_box: tuple[int, int, int, int],
-    ) -> tuple[int, int] | None:
+    ) -> np.ndarray | None:
         x, y, w, h = clue_box
         if w <= 0 or h <= 0:
             return None
@@ -56,10 +57,39 @@ class ImageParser:
         crop = image[y0:y1, x0:x1]
         if crop.size == 0:
             return None
+        return crop.copy()
 
-        return self.parse_clue_box(crop)
+    def save_clue_crop(
+        self,
+        image_path: str,
+        clue_box: tuple[int, int, int, int],
+        output_path: str | Path,
+    ) -> bool:
+        if cv2 is None:
+            return False
 
-    def parse_clue_box(self, image: str | np.ndarray) -> tuple[int, int] | None:
+        crop = self.extract_clue_crop(image_path, clue_box)
+        if crop is None:
+            return False
+
+        out_path = Path(output_path)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        return bool(cv2.imwrite(str(out_path), crop))
+
+    def parse_clue_from_screenshot(
+        self,
+        image_path: str,
+        clue_box: tuple[int, int, int, int],
+        *,
+        fast: bool = True,
+    ) -> tuple[int, int] | None:
+        crop = self.extract_clue_crop(image_path, clue_box)
+        if crop is None:
+            return None
+
+        return self.parse_clue_box(crop, fast=fast)
+
+    def parse_clue_box(self, image: str | np.ndarray, *, fast: bool = True) -> tuple[int, int] | None:
         if cv2 is None or pytesseract is None:
             return None
 
@@ -80,11 +110,12 @@ class ImageParser:
         if img_h <= 0 or img_w <= 0:
             return None
 
+        sample_offsets = [(0, 0), (-1, 0), (1, 0), (0, -1), (0, 1)] if fast else None
         pair = self._parse_clue_rects(
             cv_img,
             [(0, 0, img_w, img_h)],
-            sample_offsets=[(0, 0), (-1, 0), (1, 0)],
-            fast_ocr=True,
+            sample_offsets=sample_offsets,
+            fast_ocr=fast,
         )[0]
         return pair
 

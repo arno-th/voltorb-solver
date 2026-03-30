@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
+import csv
 import re
 import shutil
 import subprocess
@@ -247,6 +249,7 @@ class OverlayControlWindow(QMainWindow):
         self._screens = QGuiApplication.screens()
         self._cached_regions: list[Region] = []
         self._last_capture_signature: tuple[str, int | None, int, int, int, int] | None = None
+        self._clue_dataset_root = Path("assets/parser_debug/clue_dataset")
 
         root = QWidget()
         root.setObjectName("RootPanel")
@@ -736,8 +739,21 @@ class OverlayControlWindow(QMainWindow):
         pair = self.clue_parser.parse_clue_from_screenshot(
             self.state.last_input_path,
             (selected_region.x, selected_region.y, selected_region.w, selected_region.h),
+            fast=not selected_region.name.startswith("c"),
         )
         if pair is None:
+            saved_path = self._save_failed_clue_crop(selected_region)
+            if saved_path is not None:
+                self._append_clue_manifest(
+                    split="unknown",
+                    crop_path=saved_path,
+                    region_name=selected_region.name,
+                    source_path=self.state.last_input_path,
+                    clue_box=(selected_region.x, selected_region.y, selected_region.w, selected_region.h),
+                    parsed_value="",
+                    manual_value="",
+                )
+                self._offer_manual_label(saved_path, selected_region)
             QMessageBox.warning(
                 self,
                 "Parse Single Clue",
@@ -751,6 +767,126 @@ class OverlayControlWindow(QMainWindow):
             "Parse Single Clue",
             f"Parsed {selected_region.name}: voltorbs={voltorbs}, total={total}",
         )
+
+    def _save_failed_clue_crop(self, region: Region) -> Path | None:
+        if self.state.last_input_path is None:
+            return None
+
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        source_stem = Path(self.state.last_input_path).stem
+        filename = f"{ts}_{source_stem}_{region.name}.png"
+        output_path = self._clue_dataset_root / "unknown" / filename
+
+        ok = self.clue_parser.save_clue_crop(
+            self.state.last_input_path,
+            (region.x, region.y, region.w, region.h),
+            output_path,
+        )
+        if not ok:
+            return None
+        return output_path
+
+    def _offer_manual_label(self, unknown_crop_path: Path, region: Region) -> None:
+        answer = QMessageBox.question(
+            self,
+            "Label Failed Clue",
+            "Save a manual label for this failed clue crop?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+
+        label_text, ok = QInputDialog.getText(
+            self,
+            "Manual Clue Label",
+            "Enter label as voltorbs,total (e.g. 2,10):",
+        )
+        if not ok:
+            return
+
+        raw = label_text.strip()
+        match = re.fullmatch(r"\s*(\d+)\s*,\s*(\d+)\s*", raw)
+        if not match:
+            QMessageBox.warning(self, "Manual Clue Label", "Invalid format. Expected: voltorbs,total")
+            return
+
+        voltorbs = int(match.group(1))
+        total = int(match.group(2))
+        if not (0 <= voltorbs <= 5 and 0 <= total <= 15):
+            QMessageBox.warning(self, "Manual Clue Label", "Values out of range.")
+            return
+
+        stem = unknown_crop_path.stem
+        labeled_name = f"{stem}_v{voltorbs}_t{total}.png"
+        labeled_path = self._clue_dataset_root / "labeled" / labeled_name
+        labeled_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(unknown_crop_path, labeled_path)
+
+        if self.state.last_input_path is not None:
+            self._append_clue_manifest(
+                split="labeled",
+                crop_path=labeled_path,
+                region_name=region.name,
+                source_path=self.state.last_input_path,
+                clue_box=(region.x, region.y, region.w, region.h),
+                parsed_value="",
+                manual_value=f"{voltorbs},{total}",
+            )
+
+        self._set_status(
+            f"Saved labeled clue crop: {labeled_path}",
+            level="success",
+        )
+
+    def _append_clue_manifest(
+        self,
+        *,
+        split: str,
+        crop_path: Path,
+        region_name: str,
+        source_path: str,
+        clue_box: tuple[int, int, int, int],
+        parsed_value: str,
+        manual_value: str,
+    ) -> None:
+        manifest_path = self._clue_dataset_root / "manifest.csv"
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        is_new = not manifest_path.exists()
+        x, y, w, h = clue_box
+        with manifest_path.open("a", newline="", encoding="utf-8") as fh:
+            writer = csv.writer(fh)
+            if is_new:
+                writer.writerow(
+                    [
+                        "timestamp",
+                        "split",
+                        "crop_path",
+                        "source_path",
+                        "region",
+                        "x",
+                        "y",
+                        "w",
+                        "h",
+                        "parsed_value",
+                        "manual_value",
+                    ]
+                )
+            writer.writerow(
+                [
+                    datetime.now().isoformat(timespec="seconds"),
+                    split,
+                    str(crop_path),
+                    source_path,
+                    region_name,
+                    x,
+                    y,
+                    w,
+                    h,
+                    parsed_value,
+                    manual_value,
+                ]
+            )
 
     def relabel_regions(self) -> None:
         if self.state.last_input_path is None:

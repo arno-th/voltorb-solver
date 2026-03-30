@@ -141,3 +141,39 @@ def test_parse_clue_from_screenshot_rejects_invalid_box(tmp_path: Path) -> None:
     result = parser.parse_clue_from_screenshot(str(image_path), (0, 0, 0, 10))
 
     assert result is None
+
+
+def test_extract_clue_crop_returns_expected_shape(monkeypatch) -> None:
+    parser = ImageParser()
+
+    fake_cv2 = types.SimpleNamespace()
+    fake_cv2.imread = lambda _path: np.zeros((60, 90, 3), dtype=np.uint8)
+    monkeypatch.setattr(parser_module, "cv2", fake_cv2)
+
+    crop = parser.extract_clue_crop("dummy.png", (10, 20, 15, 12))
+
+    assert crop is not None
+    assert crop.shape[:2] == (12, 15)
+
+
+def test_save_clue_crop_writes_image(monkeypatch, tmp_path: Path) -> None:
+    parser = ImageParser()
+    written: list[tuple[str, tuple[int, ...]]] = []
+
+    fake_cv2 = types.SimpleNamespace()
+    fake_cv2.imread = lambda _path: np.zeros((40, 50, 3), dtype=np.uint8)
+
+    def fake_imwrite(path: str, img: np.ndarray) -> bool:
+        written.append((path, img.shape))
+        return True
+
+    fake_cv2.imwrite = fake_imwrite
+    monkeypatch.setattr(parser_module, "cv2", fake_cv2)
+
+    out_path = tmp_path / "out" / "crop.png"
+    ok = parser.save_clue_crop("dummy.png", (5, 6, 10, 8), out_path)
+
+    assert ok is True
+    assert len(written) == 1
+    assert written[0][0] == str(out_path)
+    assert written[0][1][:2] == (8, 10)
