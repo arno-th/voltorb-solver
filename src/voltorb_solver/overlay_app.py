@@ -1074,10 +1074,11 @@ class OverlayControlWindow(QMainWindow):
             return
 
         self.state.last_input_path = image_path
-        self._cached_regions = list(result.regions)
+        overlay_regions = self._expand_with_clue_subregions(result.regions)
+        self._cached_regions = list(overlay_regions)
         self._last_capture_signature = capture_signature
         self.x11_overlay.set_mapping_rect(self._mapping_rect_for_signature(capture_signature))
-        self.x11_overlay.set_overlay_data(result.regions, result.image_width, result.image_height)
+        self.x11_overlay.set_overlay_data(overlay_regions, result.image_width, result.image_height)
 
         warning_text = ""
         if result.warnings:
@@ -1086,9 +1087,44 @@ class OverlayControlWindow(QMainWindow):
         monitor_text = f" Monitor: {self.state.selected_screen_index + 1}."
         level = "warning" if result.warnings else "success"
         self._set_status(
-            f"Parsed {len(result.regions)} regions from {Path(image_path).name} ({relabel_reason}).{method_text}{monitor_text}{warning_text}",
+            f"Parsed {len(result.regions)} base regions (+ clue subregions) from {Path(image_path).name} ({relabel_reason}).{method_text}{monitor_text}{warning_text}",
             level=level,
         )
+
+    def _expand_with_clue_subregions(self, regions: list[Region]) -> list[Region]:
+        total_bounds = getattr(self.clue_parser, "_TOTAL_OCR_BOUNDS", (0.05, 0.02, 0.95, 0.42))
+        voltorb_bounds = getattr(self.clue_parser, "_VOLTORB_OCR_BOUNDS", (0.52, 0.50, 0.98, 0.98))
+
+        expanded = list(regions)
+        for region in regions:
+            if not self._is_clue_region(region.name):
+                continue
+
+            total_rect = self._subregion_from_bounds(region, total_bounds)
+            voltorb_rect = self._subregion_from_bounds(region, voltorb_bounds)
+
+            expanded.append(Region(f"{region.name}.total", *total_rect))
+            expanded.append(Region(f"{region.name}.voltorbs", *voltorb_rect))
+        return expanded
+
+    def _is_clue_region(self, name: str) -> bool:
+        if len(name) < 2:
+            return False
+        if name[0] not in {"r", "c"}:
+            return False
+        return name[1:].isdigit()
+
+    def _subregion_from_bounds(
+        self,
+        region: Region,
+        bounds: tuple[float, float, float, float],
+    ) -> tuple[int, int, int, int]:
+        x0_f, y0_f, x1_f, y1_f = bounds
+        x0 = region.x + max(0, min(int(round(region.w * x0_f)), region.w - 1))
+        y0 = region.y + max(0, min(int(round(region.h * y0_f)), region.h - 1))
+        x1 = region.x + max(x0 - region.x + 1, min(int(round(region.w * x1_f)), region.w))
+        y1 = region.y + max(y0 - region.y + 1, min(int(round(region.h * y1_f)), region.h))
+        return x0, y0, max(1, x1 - x0), max(1, y1 - y0)
 
     def _show_error(self, message: str) -> None:
         self._set_status(message, level="error")

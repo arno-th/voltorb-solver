@@ -177,3 +177,15 @@ def test_save_clue_crop_writes_image(monkeypatch, tmp_path: Path) -> None:
     assert len(written) == 1
     assert written[0][0] == str(out_path)
     assert written[0][1][:2] == (8, 10)
+
+
+def test_split_clue_fields_returns_stable_regions() -> None:
+    parser = ImageParser()
+    crop = np.zeros((100, 120, 3), dtype=np.uint8)
+
+    split = parser.split_clue_fields(crop)
+
+    assert split is not None
+    voltorbs_roi, total_roi = split
+    assert voltorbs_roi.shape[:2] == (48, 48)
+    assert total_roi.shape[:2] == (40, 102)

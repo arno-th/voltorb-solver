@@ -33,6 +33,12 @@ class ParseResult:
 
 
 class ImageParser:
+    # Normalized clue-field bounds (x0, y0, x1, y1) inside a single clue box.
+    _TOTAL_TOKEN_BOUNDS = (0.45, 0.02, 0.95, 0.42)
+    _VOLTORB_TOKEN_BOUNDS = (0.40, 0.50, 0.98, 0.98)
+    _TOTAL_OCR_BOUNDS = (0.10, 0.02, 0.95, 0.42)
+    _VOLTORB_OCR_BOUNDS = (0.58, 0.50, 0.98, 0.98)
+
     def extract_clue_crop(
         self,
         image_path: str,
@@ -58,6 +64,17 @@ class ImageParser:
         if crop.size == 0:
             return None
         return crop.copy()
+
+    def split_clue_fields(self, clue_crop: np.ndarray) -> tuple[np.ndarray, np.ndarray] | None:
+        """Return (voltorbs_roi, total_roi) for one clue crop using fixed normalized bounds."""
+        if clue_crop.size == 0:
+            return None
+
+        total_roi = self._crop_by_bounds(clue_crop, self._TOTAL_OCR_BOUNDS)
+        voltorbs_roi = self._crop_by_bounds(clue_crop, self._VOLTORB_OCR_BOUNDS)
+        if total_roi.size == 0 or voltorbs_roi.size == 0:
+            return None
+        return voltorbs_roi, total_roi
 
     def save_clue_crop(
         self,
@@ -118,6 +135,19 @@ class ImageParser:
             fast_ocr=fast,
         )[0]
         return pair
+
+    def _crop_by_bounds(
+        self,
+        image: np.ndarray,
+        bounds: tuple[float, float, float, float],
+    ) -> np.ndarray:
+        h, w = image.shape[:2]
+        x0_f, y0_f, x1_f, y1_f = bounds
+        x0 = max(0, min(int(round(w * x0_f)), w - 1))
+        y0 = max(0, min(int(round(h * y0_f)), h - 1))
+        x1 = max(x0 + 1, min(int(round(w * x1_f)), w))
+        y1 = max(y0 + 1, min(int(round(h * y1_f)), h))
+        return image[y0:y1, x0:x1]
 
     def parse_image(self, image_path: str, crop_rect: tuple[int, int, int, int]) -> ParseResult:
         result = ParseResult()
@@ -421,8 +451,8 @@ class ImageParser:
                 if roi.size == 0:
                     continue
 
-                top_token_roi = roi[int(sh * 0.02) : int(sh * 0.42), int(sw * 0.45) : int(sw * 0.95)]
-                bottom_token_roi = roi[int(sh * 0.50) : int(sh * 0.98), int(sw * 0.40) : int(sw * 0.98)]
+                top_token_roi = self._crop_by_bounds(roi, self._TOTAL_TOKEN_BOUNDS)
+                bottom_token_roi = self._crop_by_bounds(roi, self._VOLTORB_TOKEN_BOUNDS)
                 top_token = self._read_pixel_token(top_token_roi)
                 bottom_token = self._read_pixel_token(bottom_token_roi)
 
@@ -434,8 +464,8 @@ class ImageParser:
                         candidates.append(token_pair)
                     continue
 
-                top_roi = roi[max(0, int(sh * 0.02)) : max(1, int(sh * 0.42)), int(sw * 0.05) : int(sw * 0.95)]
-                bottom_roi = roi[int(sh * 0.50) : max(1, int(sh * 0.98)), int(sw * 0.52) : int(sw * 0.98)]
+                top_roi = self._crop_by_bounds(roi, self._TOTAL_OCR_BOUNDS)
+                bottom_roi = self._crop_by_bounds(roi, self._VOLTORB_OCR_BOUNDS)
 
                 total = self._ocr_number(top_roi, min_value=0, max_value=15, fast=fast_ocr)
                 voltorbs = self._ocr_number(bottom_roi, min_value=0, max_value=5, fast=fast_ocr)
