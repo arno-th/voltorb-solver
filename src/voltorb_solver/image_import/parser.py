@@ -147,20 +147,16 @@ class ImageParser:
         voltorbs_roi, total_roi = split
         ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         output_root_path = Path(output_root)
-        raw_dir = output_root_path / "raw"
-        pre_dir = output_root_path / "preprocessed"
-        log_dir = output_root_path / "logs"
-        raw_dir.mkdir(parents=True, exist_ok=True)
-        pre_dir.mkdir(parents=True, exist_ok=True)
-        log_dir.mkdir(parents=True, exist_ok=True)
 
-        # Keep filenames stable and sortable for quick manual inspection.
-        file_prefix = f"{region_name}_{ts}"
-        raw_voltorbs_path = raw_dir / f"{file_prefix}_voltorbs.png"
-        raw_total_path = raw_dir / f"{file_prefix}_total.png"
-        preprocessed_voltorbs_path = pre_dir / f"{file_prefix}_voltorbs_bw.png"
-        preprocessed_total_path = pre_dir / f"{file_prefix}_total_bw.png"
-        log_path = log_dir / f"{file_prefix}.log"
+        # Save each debug parse in its own folder so all artifacts for a run stay together.
+        run_dir = output_root_path / f"{region_name}_{ts}"
+        run_dir.mkdir(parents=True, exist_ok=True)
+
+        raw_voltorbs_path = run_dir / "raw_voltorbs.png"
+        raw_total_path = run_dir / "raw_total.png"
+        preprocessed_voltorbs_path = run_dir / "preprocessed_voltorbs_bw.png"
+        preprocessed_total_path = run_dir / "preprocessed_total_bw.png"
+        log_path = run_dir / "debug.log"
 
         cv2.imwrite(str(raw_voltorbs_path), voltorbs_roi)
         cv2.imwrite(str(raw_total_path), total_roi)

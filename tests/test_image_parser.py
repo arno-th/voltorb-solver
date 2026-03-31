@@ -231,6 +231,14 @@ def test_debug_parse_clue_from_screenshot_writes_artifacts_and_log(monkeypatch, 
     assert artifacts.voltorbs_value == 2
     assert artifacts.total_value == 10
     assert artifacts.log_path.exists()
+    parent_dirs = {
+        artifacts.raw_voltorbs_path.parent,
+        artifacts.raw_total_path.parent,
+        artifacts.preprocessed_voltorbs_path.parent,
+        artifacts.preprocessed_total_path.parent,
+        artifacts.log_path.parent,
+    }
+    assert len(parent_dirs) == 1
 
     log_text = artifacts.log_path.read_text(encoding="utf-8")
     assert "region=r2" in log_text
