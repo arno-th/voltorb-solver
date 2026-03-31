@@ -166,7 +166,7 @@ class ImageParser:
         cv2.imwrite(str(preprocessed_voltorbs_path), voltorbs_pre)
         cv2.imwrite(str(preprocessed_total_path), total_pre)
 
-        ocr_config = "--oem 3 --psm 10 -c tessedit_char_whitelist=0123456789"
+        ocr_config = "--psm 6"
         voltorbs_text = pytesseract.image_to_string(voltorbs_pre, config=ocr_config).strip()
         total_text = pytesseract.image_to_string(total_pre, config=ocr_config).strip()
 
@@ -271,8 +271,8 @@ class ImageParser:
         return cv_img
 
     def _preprocess_clue_debug_roi(self, roi: np.ndarray) -> np.ndarray:
-        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-        return cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
+        grayscale_im = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        return cv2.threshold(grayscale_im, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
 
     def _extract_first_int(self, raw_text: str) -> int | None:
         match = re.search(r"\d+", raw_text)
@@ -342,8 +342,8 @@ class ImageParser:
                 debug_lines.append(f"field={field_name} backend=tesseract runtime_unavailable")
             return None, -1.0
 
-        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-        nearest = cv2.resize(gray, None, fx=6.0, fy=6.0, interpolation=cv2.INTER_NEAREST)
+        grayscale_im = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        nearest = cv2.resize(grayscale_im, None, fx=6.0, fy=6.0, interpolation=cv2.INTER_NEAREST)
         variants = [
             ("nearest", nearest),
             ("otsu", cv2.threshold(nearest, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]),
