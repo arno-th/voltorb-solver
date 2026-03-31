@@ -100,12 +100,7 @@ class ScreenBoardParser:
         board_method = "tile-template-grid"
         board = self._detect_board_grid_from_templates(image, panel)
         if board is None:
-            board_method = "contour-grid"
-            board = self._detect_board_grid(image, panel)
-        if board is None:
-            warnings.append("Could not detect board grid by tile contours; using panel-relative fallback.")
-            board_method = "panel-fallback-grid"
-            board = self._fallback_board(panel)
+            raise ValueError("Could not detect board grid from tile templates.")
         self._debug_log(f"board_method={board_method} board={board}")
 
         regions = self._build_regions(image_w, image_h, panel, board)
@@ -198,62 +193,6 @@ class ScreenBoardParser:
         if not candidates:
             return None
         return max(candidates, key=lambda c: c[2] * c[3])
-
-    def _detect_board_grid(
-        self, image: np.ndarray, panel: tuple[int, int, int, int]
-    ) -> tuple[int, int, int, int] | None:
-        px, py, pw, ph = panel
-        roi = image[py : py + ph, px : px + pw]
-        if roi.size == 0:
-            return None
-
-        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-        edges = cv2.Canny(gray, 60, 150)
-        contours, _ = cv2.findContours(edges, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
-
-        min_side = max(14, int(min(pw, ph) * 0.035))
-        max_side = max(30, int(min(pw, ph) * 0.17))
-        boxes: list[tuple[float, float, int]] = []
-        for contour in contours:
-            perimeter = cv2.arcLength(contour, True)
-            approx = cv2.approxPolyDP(contour, 0.05 * perimeter, True)
-            if len(approx) != 4:
-                continue
-            x, y, w, h = cv2.boundingRect(approx)
-            if w < min_side or h < min_side or w > max_side or h > max_side:
-                continue
-            aspect = w / max(h, 1)
-            if not 0.75 <= aspect <= 1.25:
-                continue
-            cx = x + w / 2.0
-            cy = y + h / 2.0
-            side = int(round((w + h) / 2.0))
-            boxes.append((cx, cy, side))
-
-        if len(boxes) < 18:
-            return None
-
-        x_clusters = self._cluster_axis([item[0] for item in boxes], tolerance=10)
-        y_clusters = self._cluster_axis([item[1] for item in boxes], tolerance=10)
-        if len(x_clusters) < 5 or len(y_clusters) < 5:
-            return None
-
-        x_clusters = self._select_grid_clusters(x_clusters, expected=5)
-        y_clusters = self._select_grid_clusters(y_clusters, expected=5)
-        x_centers = sorted(cluster[0] for cluster in x_clusters)
-        y_centers = sorted(cluster[0] for cluster in y_clusters)
-
-        side = int(round(np.median([item[2] for item in boxes])))
-        self._grid_layout = {
-            "x_centers": [px + center for center in x_centers],
-            "y_centers": [py + center for center in y_centers],
-            "tile_side": int(side),
-        }
-        board_x = int(round(px + x_centers[0] - side / 2))
-        board_y = int(round(py + y_centers[0] - side / 2))
-        board_w = int(round((x_centers[-1] - x_centers[0]) + side))
-        board_h = int(round((y_centers[-1] - y_centers[0]) + side))
-        return board_x, board_y, board_w, board_h
 
     def _detect_board_grid_from_templates(
         self,
@@ -580,14 +519,6 @@ class ScreenBoardParser:
             return None
         best_data["score"] = best_score
         return best_data
-
-    def _fallback_board(self, panel: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
-        px, py, pw, ph = panel
-        board_w = int(round(pw * 0.57))
-        board_h = int(round(ph * 0.42))
-        board_x = int(round(px + pw * 0.02))
-        board_y = int(round(py + ph * 0.50))
-        return board_x, board_y, board_w, board_h
 
     def _build_regions(
         self,
