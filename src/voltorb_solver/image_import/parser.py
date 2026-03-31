@@ -130,6 +130,7 @@ class ImageParser:
         *,
         output_root: str | Path,
         region_name: str = "clue",
+        run_id: str | None = None,
     ) -> ClueDebugArtifacts | None:
         if cv2 is None or pytesseract is None:
             return None
@@ -148,8 +149,12 @@ class ImageParser:
         ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         output_root_path = Path(output_root)
 
-        # Save each debug parse in its own folder so all artifacts for a run stay together.
-        run_dir = output_root_path / f"{region_name}_{ts}"
+        # Batch mode layout: <output_root>/<run_id>/<region_name>/...
+        # Single mode layout: <output_root>/<region_name>_<timestamp>/...
+        if run_id:
+            run_dir = output_root_path / run_id / region_name
+        else:
+            run_dir = output_root_path / f"{region_name}_{ts}"
         run_dir.mkdir(parents=True, exist_ok=True)
 
         raw_voltorbs_path = run_dir / "raw_voltorbs.png"
@@ -214,6 +219,7 @@ class ImageParser:
         x, y, w, h = clue_box
         log_lines = [
             f"source={image_path}",
+            f"run_id={run_id}",
             f"region={region_name}",
             f"clue_box=({x},{y},{w},{h})",
             f"upscaled_voltorbs={upscaled_voltorbs_path}",

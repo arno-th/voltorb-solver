@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QInputDialog,
+    QProgressDialog,
     QPushButton,
     QVBoxLayout,
     QWidget,
@@ -766,19 +767,47 @@ class OverlayControlWindow(QMainWindow):
         if not selected_regions:
             return
 
+        debug_run_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+
         successes: list[tuple[str, Path, int | None, int | None]] = []
         failures: list[str] = []
-        for region in selected_regions:
+        progress = QProgressDialog("Preparing debug parse...", "Cancel", 0, len(selected_regions), self)
+        progress.setWindowTitle("Parse Clue Debug")
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setAutoClose(False)
+        progress.setAutoReset(False)
+
+        canceled = False
+        processed = 0
+        for idx, region in enumerate(selected_regions, start=1):
+            if progress.wasCanceled():
+                canceled = True
+                break
+
+            progress.setValue(idx - 1)
+            progress.setLabelText(f"Parsing {region.name} ({idx}/{len(selected_regions)})...")
+            self._set_status(
+                f"Debug parsing {region.name} ({idx}/{len(selected_regions)})...",
+                level="info",
+            )
+            QApplication.processEvents()
+
             artifacts = self.clue_parser.debug_parse_clue_from_screenshot(
                 self.state.last_input_path,
                 (region.x, region.y, region.w, region.h),
                 output_root=self._clue_dataset_root / "debug_parse",
                 region_name=region.name,
+                run_id=debug_run_id,
             )
+            processed = idx
             if artifacts is None:
                 failures.append(region.name)
                 continue
             successes.append((region.name, artifacts.log_path, artifacts.voltorbs_value, artifacts.total_value))
+
+        progress.setValue(processed)
+        progress.close()
 
         if successes:
             self._set_status(
@@ -790,13 +819,18 @@ class OverlayControlWindow(QMainWindow):
                 "Debug parse failed for all selected clues. Verify OCR dependencies and clue region geometry.",
                 level="error",
             )
+        elif canceled:
+            self._set_status("Debug parsing canceled.", level="warning")
 
         summary_lines = [
+            f"Run id: {debug_run_id}",
             f"Selected clues: {len(selected_regions)}",
             f"Succeeded: {len(successes)}",
             f"Failed: {len(failures)}",
             "",
         ]
+        if canceled:
+            summary_lines.insert(3, f"Canceled after: {processed}/{len(selected_regions)}")
         for name, log_path, voltorbs, total in successes[:12]:
             summary_lines.append(f"{name}: voltorbs={voltorbs}, total={total}")
             summary_lines.append(f"  log: {log_path}")

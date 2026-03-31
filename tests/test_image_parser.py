@@ -226,6 +226,7 @@ def test_debug_parse_clue_from_screenshot_writes_artifacts_and_log(monkeypatch, 
         (10, 20, 30, 25),
         output_root=tmp_path / "debug_parse",
         region_name="r2",
+        run_id="batch_001",
     )
 
     assert artifacts is not None
@@ -233,6 +234,8 @@ def test_debug_parse_clue_from_screenshot_writes_artifacts_and_log(monkeypatch, 
     assert artifacts.voltorbs_value == 2
     assert artifacts.total_value == 10
     assert artifacts.log_path.exists()
+    assert artifacts.log_path.parent.name == "r2"
+    assert artifacts.log_path.parent.parent.name == "batch_001"
     parent_dirs = {
         artifacts.raw_voltorbs_path.parent,
         artifacts.raw_total_path.parent,
