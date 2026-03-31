@@ -254,6 +254,9 @@ class OverlayControlWindow(QMainWindow):
         self._screens = QGuiApplication.screens()
         self._cached_regions: list[Region] = []
         self._last_capture_signature: tuple[str, int | None, int, int, int, int] | None = None
+        self._clue_parsed_values: dict[str, tuple[int, int]] = {}
+        self._last_image_size: tuple[int, int] | None = None
+        self._last_parse_regions: list[Region] = []
         self._clue_dataset_root = Path("assets/parser_debug/clue_dataset")
 
         root = QWidget()
@@ -340,6 +343,9 @@ class OverlayControlWindow(QMainWindow):
         self.parse_clue_btn = QPushButton("Parse Single Clue")
         self.parse_clue_btn.setObjectName("SecondaryButton")
         self.parse_clue_btn.clicked.connect(self.parse_single_clue)
+        self.parse_all_clues_btn = QPushButton("Parse All Clues")
+        self.parse_all_clues_btn.setObjectName("SecondaryButton")
+        self.parse_all_clues_btn.clicked.connect(self.parse_all_clues)
         self.parse_clue_debug_btn = QPushButton("Parse Clue Debug")
         self.parse_clue_debug_btn.setObjectName("SecondaryButton")
         self.parse_clue_debug_btn.clicked.connect(self.parse_clue_debug)
@@ -356,6 +362,7 @@ class OverlayControlWindow(QMainWindow):
         button_row.addWidget(self.target_window_btn)
         button_row.addWidget(self.load_btn)
         button_row.addWidget(self.parse_clue_btn)
+        button_row.addWidget(self.parse_all_clues_btn)
         button_row.addWidget(self.parse_clue_debug_btn)
         button_row.addWidget(self.save_btn)
         button_row.addWidget(self.relabel_btn)
@@ -748,6 +755,8 @@ class OverlayControlWindow(QMainWindow):
             return
 
         voltorbs, total = pair
+        self._clue_parsed_values[selected_region.name] = (voltorbs, total)
+        self._apply_clue_label_updates()
         QMessageBox.information(
             self,
             "Parse Single Clue",
@@ -1162,6 +1171,9 @@ class OverlayControlWindow(QMainWindow):
         self.state.last_input_path = None
         self._cached_regions = []
         self._last_capture_signature = None
+        self._clue_parsed_values = {}
+        self._last_image_size = None
+        self._last_parse_regions = []
         self._set_status("Overlay cleared.", level="info")
 
     def toggle_overlay(self, checked: bool) -> None:
@@ -1309,6 +1321,9 @@ class OverlayControlWindow(QMainWindow):
             return
 
         self.state.last_input_path = image_path
+        self._last_image_size = (result.image_width, result.image_height)
+        self._last_parse_regions = list(result.regions)
+        self._clue_parsed_values = {}
         overlay_regions = self._expand_with_clue_subregions(result.regions)
         self._cached_regions = list(overlay_regions)
         self._last_capture_signature = capture_signature
@@ -1330,9 +1345,10 @@ class OverlayControlWindow(QMainWindow):
         total_bounds = getattr(self.clue_parser, "_TOTAL_OCR_BOUNDS", (0.05, 0.02, 0.95, 0.42))
         voltorb_bounds = getattr(self.clue_parser, "_VOLTORB_OCR_BOUNDS", (0.52, 0.50, 0.98, 0.98))
 
-        expanded = list(regions)
+        expanded = []
         for region in regions:
             if not self._is_clue_region(region.name):
+                expanded.append(region)
                 continue
 
             total_rect = self._subregion_from_bounds(region, total_bounds)
@@ -1360,6 +1376,60 @@ class OverlayControlWindow(QMainWindow):
         x1 = region.x + max(x0 - region.x + 1, min(int(round(region.w * x1_f)), region.w))
         y1 = region.y + max(y0 - region.y + 1, min(int(round(region.h * y1_f)), region.h))
         return x0, y0, max(1, x1 - x0), max(1, y1 - y0)
+
+    def _apply_clue_label_updates(self) -> None:
+        if self._last_image_size is None:
+            return
+        labeled = []
+        for region in self._cached_regions:
+            if "." in region.name:
+                clue_name, field = region.name.rsplit(".", 1)
+                values = self._clue_parsed_values.get(clue_name)
+                if values is not None:
+                    voltorbs, total = values
+                    if field == "total":
+                        new_name = f"{clue_name}.total={total}"
+                    elif field == "voltorbs":
+                        new_name = f"{clue_name}.v={voltorbs}"
+                    else:
+                        new_name = region.name
+                    labeled.append(Region(new_name, region.x, region.y, region.w, region.h))
+                    continue
+            labeled.append(region)
+        self.x11_overlay.set_overlay_data(labeled, *self._last_image_size)
+
+    def parse_all_clues(self) -> None:
+        if self.state.last_input_path is None:
+            self._show_error("Capture or load a screenshot first.")
+            return
+        clue_regions = [r for r in self._last_parse_regions if self._is_clue_region(r.name)]
+        if not clue_regions:
+            self._show_error("No clue regions available. Capture/relabel the screenshot first.")
+            return
+        parsed_count = 0
+        failed: list[str] = []
+        for region in clue_regions:
+            pair = self.clue_parser.parse_clue_from_screenshot(
+                self.state.last_input_path,
+                (region.x, region.y, region.w, region.h),
+                fast=not region.name.startswith("c"),
+            )
+            if pair is not None:
+                self._clue_parsed_values[region.name] = pair
+                parsed_count += 1
+            else:
+                failed.append(region.name)
+        self._apply_clue_label_updates()
+        if failed:
+            self._set_status(
+                f"Parsed {parsed_count}/{len(clue_regions)} clues. Failed: {', '.join(failed)}.",
+                level="warning",
+            )
+        else:
+            self._set_status(
+                f"Parsed all {parsed_count} clues. Overlay labels updated.",
+                level="success",
+            )
 
     def _show_error(self, message: str) -> None:
         self._set_status(message, level="error")
