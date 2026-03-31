@@ -5,6 +5,7 @@ from pathlib import Path
 import re
 import shutil
 import statistics
+from datetime import datetime
 from collections import Counter
 from dataclasses import dataclass, field
 
@@ -35,6 +36,19 @@ class ParseResult:
     col_clues: list[Clue] = field(default_factory=lambda: [Clue() for _ in range(BOARD_SIZE)])
     revealed_tiles: dict[tuple[int, int], int] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class ClueDebugArtifacts:
+    raw_voltorbs_path: Path
+    raw_total_path: Path
+    preprocessed_voltorbs_path: Path
+    preprocessed_total_path: Path
+    log_path: Path
+    voltorbs_text: str
+    total_text: str
+    voltorbs_value: int | None
+    total_value: int | None
 
 
 class ImageParser:
@@ -147,6 +161,89 @@ class ImageParser:
 
         return self.parse_clue_box(crop, fast=fast)
 
+    def debug_parse_clue_from_screenshot(
+        self,
+        image_path: str,
+        clue_box: tuple[int, int, int, int],
+        *,
+        output_root: str | Path,
+        region_name: str = "clue",
+    ) -> ClueDebugArtifacts | None:
+        if cv2 is None or pytesseract is None:
+            return None
+        if not self._configure_tesseract_runtime():
+            return None
+
+        crop = self.extract_clue_crop(image_path, clue_box)
+        if crop is None:
+            return None
+
+        split = self.split_clue_fields(crop)
+        if split is None:
+            return None
+
+        voltorbs_roi, total_roi = split
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        output_root_path = Path(output_root)
+        raw_dir = output_root_path / "raw"
+        pre_dir = output_root_path / "preprocessed"
+        log_dir = output_root_path / "logs"
+        raw_dir.mkdir(parents=True, exist_ok=True)
+        pre_dir.mkdir(parents=True, exist_ok=True)
+        log_dir.mkdir(parents=True, exist_ok=True)
+
+        # Keep filenames stable and sortable for quick manual inspection.
+        file_prefix = f"{region_name}_{ts}"
+        raw_voltorbs_path = raw_dir / f"{file_prefix}_voltorbs.png"
+        raw_total_path = raw_dir / f"{file_prefix}_total.png"
+        preprocessed_voltorbs_path = pre_dir / f"{file_prefix}_voltorbs_bw.png"
+        preprocessed_total_path = pre_dir / f"{file_prefix}_total_bw.png"
+        log_path = log_dir / f"{file_prefix}.log"
+
+        cv2.imwrite(str(raw_voltorbs_path), voltorbs_roi)
+        cv2.imwrite(str(raw_total_path), total_roi)
+
+        voltorbs_pre = self._preprocess_clue_debug_roi(voltorbs_roi)
+        total_pre = self._preprocess_clue_debug_roi(total_roi)
+        cv2.imwrite(str(preprocessed_voltorbs_path), voltorbs_pre)
+        cv2.imwrite(str(preprocessed_total_path), total_pre)
+
+        ocr_config = "--oem 3 --psm 10 -c tessedit_char_whitelist=0123456789"
+        voltorbs_text = pytesseract.image_to_string(voltorbs_pre, config=ocr_config).strip()
+        total_text = pytesseract.image_to_string(total_pre, config=ocr_config).strip()
+
+        voltorbs_value = self._extract_first_int(voltorbs_text)
+        total_value = self._extract_first_int(total_text)
+
+        x, y, w, h = clue_box
+        log_lines = [
+            f"source={image_path}",
+            f"region={region_name}",
+            f"clue_box=({x},{y},{w},{h})",
+            f"raw_voltorbs={raw_voltorbs_path}",
+            f"raw_total={raw_total_path}",
+            f"preprocessed_voltorbs={preprocessed_voltorbs_path}",
+            f"preprocessed_total={preprocessed_total_path}",
+            f"tesseract_config={ocr_config}",
+            f"voltorbs_text={voltorbs_text!r}",
+            f"total_text={total_text!r}",
+            f"voltorbs_value={voltorbs_value}",
+            f"total_value={total_value}",
+        ]
+        log_path.write_text("\n".join(log_lines) + "\n", encoding="utf-8")
+
+        return ClueDebugArtifacts(
+            raw_voltorbs_path=raw_voltorbs_path,
+            raw_total_path=raw_total_path,
+            preprocessed_voltorbs_path=preprocessed_voltorbs_path,
+            preprocessed_total_path=preprocessed_total_path,
+            log_path=log_path,
+            voltorbs_text=voltorbs_text,
+            total_text=total_text,
+            voltorbs_value=voltorbs_value,
+            total_value=total_value,
+        )
+
     def parse_clue_box(self, image: str | np.ndarray, *, fast: bool = True) -> tuple[int, int] | None:
         debug_lines: list[str] = [
             f"parse_clue_box fast={fast}",
@@ -214,6 +311,16 @@ class ImageParser:
         elif cv_img.ndim != 3 or cv_img.shape[2] < 3:
             return None
         return cv_img
+
+    def _preprocess_clue_debug_roi(self, roi: np.ndarray) -> np.ndarray:
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        return cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
+
+    def _extract_first_int(self, raw_text: str) -> int | None:
+        match = re.search(r"\d+", raw_text)
+        if match is None:
+            return None
+        return int(match.group(0))
 
     def _ocr_number_field(
         self,

@@ -335,6 +335,9 @@ class OverlayControlWindow(QMainWindow):
         self.parse_clue_btn = QPushButton("Parse Single Clue")
         self.parse_clue_btn.setObjectName("SecondaryButton")
         self.parse_clue_btn.clicked.connect(self.parse_single_clue)
+        self.parse_clue_debug_btn = QPushButton("Parse Clue Debug")
+        self.parse_clue_debug_btn.setObjectName("SecondaryButton")
+        self.parse_clue_debug_btn.clicked.connect(self.parse_clue_debug)
         self.save_btn = QPushButton("Save Labeled Screenshot")
         self.save_btn.setObjectName("SecondaryButton")
         self.save_btn.clicked.connect(self.save_labeled)
@@ -348,6 +351,7 @@ class OverlayControlWindow(QMainWindow):
         button_row.addWidget(self.target_window_btn)
         button_row.addWidget(self.load_btn)
         button_row.addWidget(self.parse_clue_btn)
+        button_row.addWidget(self.parse_clue_debug_btn)
         button_row.addWidget(self.save_btn)
         button_row.addWidget(self.relabel_btn)
         button_row.addWidget(self.clear_btn)
@@ -707,33 +711,8 @@ class OverlayControlWindow(QMainWindow):
             self._show_error("Capture or load a screenshot first.")
             return
 
-        clue_regions = [
-            region
-            for region in self._cached_regions
-            if (region.name.startswith("r") or region.name.startswith("c")) and region.name[1:].isdigit()
-        ]
-        if not clue_regions:
-            self._show_error("No clue regions available. Capture/relabel the screenshot first.")
-            return
-
-        ordered_names = sorted(
-            (region.name for region in clue_regions),
-            key=lambda name: (name[0], int(name[1:])),
-        )
-        selected_name, ok = QInputDialog.getItem(
-            self,
-            "Choose Clue Box",
-            "Select clue region:",
-            ordered_names,
-            0,
-            False,
-        )
-        if not ok:
-            return
-
-        selected_region = next((region for region in clue_regions if region.name == selected_name), None)
+        selected_region = self._pick_clue_region()
         if selected_region is None:
-            self._show_error(f"Selected clue region `{selected_name}` is not available.")
             return
 
         pair = self.clue_parser.parse_clue_from_screenshot(
@@ -770,6 +749,77 @@ class OverlayControlWindow(QMainWindow):
             f"Parsed {selected_region.name}: voltorbs={voltorbs}, total={total}\n"
             f"Debug log: {debug_log_path}",
         )
+
+    def parse_clue_debug(self) -> None:
+        if self.state.last_input_path is None:
+            self._show_error("Capture or load a screenshot first.")
+            return
+
+        selected_region = self._pick_clue_region()
+        if selected_region is None:
+            return
+
+        artifacts = self.clue_parser.debug_parse_clue_from_screenshot(
+            self.state.last_input_path,
+            (selected_region.x, selected_region.y, selected_region.w, selected_region.h),
+            output_root=self._clue_dataset_root / "debug_parse",
+            region_name=selected_region.name,
+        )
+        if artifacts is None:
+            QMessageBox.warning(
+                self,
+                "Parse Clue Debug",
+                "Debug parse failed. Verify OCR dependencies and clue region geometry.",
+            )
+            return
+
+        self._set_status(
+            f"Saved clue debug artifacts for {selected_region.name}. Log: {artifacts.log_path}",
+            level="success",
+        )
+        QMessageBox.information(
+            self,
+            "Parse Clue Debug",
+            "Saved debug artifacts.\n"
+            f"Raw voltorbs: {artifacts.raw_voltorbs_path}\n"
+            f"Raw total: {artifacts.raw_total_path}\n"
+            f"Preprocessed voltorbs: {artifacts.preprocessed_voltorbs_path}\n"
+            f"Preprocessed total: {artifacts.preprocessed_total_path}\n"
+            f"OCR voltorbs text/value: {artifacts.voltorbs_text!r} / {artifacts.voltorbs_value}\n"
+            f"OCR total text/value: {artifacts.total_text!r} / {artifacts.total_value}\n"
+            f"Log: {artifacts.log_path}",
+        )
+
+    def _pick_clue_region(self) -> Region | None:
+        clue_regions = [
+            region
+            for region in self._cached_regions
+            if (region.name.startswith("r") or region.name.startswith("c")) and region.name[1:].isdigit()
+        ]
+        if not clue_regions:
+            self._show_error("No clue regions available. Capture/relabel the screenshot first.")
+            return None
+
+        ordered_names = sorted(
+            (region.name for region in clue_regions),
+            key=lambda name: (name[0], int(name[1:])),
+        )
+        selected_name, ok = QInputDialog.getItem(
+            self,
+            "Choose Clue Box",
+            "Select clue region:",
+            ordered_names,
+            0,
+            False,
+        )
+        if not ok:
+            return None
+
+        selected_region = next((region for region in clue_regions if region.name == selected_name), None)
+        if selected_region is None:
+            self._show_error(f"Selected clue region `{selected_name}` is not available.")
+            return None
+        return selected_region
 
     def _write_clue_parse_debug_log(
         self,

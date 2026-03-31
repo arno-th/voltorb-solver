@@ -191,3 +191,49 @@ def test_split_clue_fields_returns_stable_regions() -> None:
     voltorbs_roi, total_roi = split
     assert voltorbs_roi.shape[:2] == (48, 48)
     assert total_roi.shape[:2] == (40, 102)
+
+
+def test_debug_parse_clue_from_screenshot_writes_artifacts_and_log(monkeypatch, tmp_path: Path) -> None:
+    parser = ImageParser()
+
+    written: list[str] = []
+
+    fake_cv2 = types.SimpleNamespace()
+    fake_cv2.COLOR_BGR2GRAY = 1
+    fake_cv2.THRESH_BINARY_INV = 2
+    fake_cv2.THRESH_OTSU = 4
+    fake_cv2.imread = lambda _path: np.zeros((80, 100, 3), dtype=np.uint8)
+    fake_cv2.cvtColor = lambda img, _code: img[:, :, 0]
+    fake_cv2.threshold = lambda img, _a, _b, _c: (0, img)
+    fake_cv2.imwrite = lambda path, _img: written.append(path) or True
+
+    ocr_calls: list[str] = []
+
+    def fake_image_to_string(_img, *, config: str = "") -> str:
+        ocr_calls.append(config)
+        return "2" if len(ocr_calls) == 1 else "10"
+
+    fake_pytesseract = types.SimpleNamespace(image_to_string=fake_image_to_string)
+
+    monkeypatch.setattr(parser_module, "cv2", fake_cv2)
+    monkeypatch.setattr(parser_module, "pytesseract", fake_pytesseract)
+    monkeypatch.setattr(parser, "_configure_tesseract_runtime", lambda: True)
+
+    artifacts = parser.debug_parse_clue_from_screenshot(
+        "dummy.png",
+        (10, 20, 30, 25),
+        output_root=tmp_path / "debug_parse",
+        region_name="r2",
+    )
+
+    assert artifacts is not None
+    assert len(written) == 4
+    assert artifacts.voltorbs_value == 2
+    assert artifacts.total_value == 10
+    assert artifacts.log_path.exists()
+
+    log_text = artifacts.log_path.read_text(encoding="utf-8")
+    assert "region=r2" in log_text
+    assert "voltorbs_text='2'" in log_text
+    assert "total_text='10'" in log_text
+    assert "tesseract_config=--oem 3 --psm 10 -c tessedit_char_whitelist=0123456789" in log_text
