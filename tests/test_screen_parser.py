@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import pytest
 import numpy as np
 
 from voltorb_solver.image_import.screen_parser import Region, ScreenBoardParser
@@ -110,23 +111,5 @@ def test_screen_parser_rejects_off_grid_template_refinement(monkeypatch) -> None
 
     monkeypatch.setattr(parser, "_match_clue_regions", _fake_match)
 
-    warnings: list[str] = []
-    refined, row_method, col_method = parser._refine_clue_regions_with_templates(
-        image,
-        regions,
-        board,
-        warnings,
-    )
-
-    assert row_method == "heuristic-clue"
-    assert col_method == "heuristic-clue"
-    assert any("Rejected template row clue matches" in warning for warning in warnings)
-    assert any("Rejected template column clue matches" in warning for warning in warnings)
-
-    original_by_name = {region.name: region for region in regions}
-    refined_by_name = {region.name: region for region in refined}
-    for idx in range(5):
-        row_name = f"r{idx}"
-        col_name = f"c{idx}"
-        assert refined_by_name[row_name] == original_by_name[row_name]
-        assert refined_by_name[col_name] == original_by_name[col_name]
+    with pytest.raises(ValueError, match="Rejected template row clue matches"):
+        parser._refine_clue_regions_with_templates(image, regions, board)

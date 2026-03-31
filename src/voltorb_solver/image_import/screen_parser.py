@@ -104,12 +104,7 @@ class ScreenBoardParser:
         self._debug_log(f"board_method={board_method} board={board}")
 
         regions = self._build_regions(image_w, image_h, panel, board)
-        regions, row_method, col_method = self._refine_clue_regions_with_templates(
-            image,
-            regions,
-            board,
-            warnings,
-        )
+        regions = self._refine_clue_regions_with_templates(image, regions, board)
 
         region_methods: dict[str, str] = {}
         for region in regions:
@@ -117,10 +112,10 @@ class ScreenBoardParser:
                 region_methods[region.name] = board_method
                 continue
             if region.name.startswith("r") and region.name[1:].isdigit():
-                region_methods[region.name] = row_method
+                region_methods[region.name] = "template-clue"
                 continue
             if region.name.startswith("c") and region.name[1:].isdigit():
-                region_methods[region.name] = col_method
+                region_methods[region.name] = "template-clue"
                 continue
             region_methods[region.name] = "unknown"
 
@@ -648,12 +643,10 @@ class ScreenBoardParser:
         image: np.ndarray,
         regions: list[Region],
         board: tuple[int, int, int, int],
-        warnings: list[str],
-    ) -> tuple[list[Region], str, str]:
+    ) -> list[Region]:
         templates = self._load_clue_templates()
         if not templates:
-            warnings.append("No clue templates found; using heuristic clue box locations.")
-            return regions, "heuristic-clue", "heuristic-clue"
+            raise ValueError("No clue templates found; cannot locate clue boxes.")
 
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         region_by_name = {region.name: region for region in regions}
@@ -665,62 +658,32 @@ class ScreenBoardParser:
             region_by_name[f"c{idx}"] for idx in range(5) if f"c{idx}" in region_by_name
         ]
         if len(expected_rows) != 5 or len(expected_cols) != 5:
-            return regions, "heuristic-clue", "heuristic-clue"
+            raise ValueError("Could not find all 5 expected row and column clue regions.")
 
         row_matches = self._match_clue_regions(gray, expected_rows, templates, axis="row")
-        col_matches = self._match_clue_regions(gray, expected_cols, templates, axis="col")
-
-        row_method = "heuristic-clue"
-        col_method = "heuristic-clue"
-
         if row_matches is None:
-            warnings.append("Template row clue matching was low confidence; using grid-aligned row clues.")
-            accepted_rows = expected_rows
-        else:
-            accepted_rows = self._accept_template_clue_matches(
-                expected_rows,
-                row_matches,
-                board,
-                axis="row",
-                warnings=warnings,
-            )
-            if accepted_rows is not None:
-                row_method = "template-clue"
-            else:
-                accepted_rows = expected_rows
-
+            raise ValueError("Template row clue matching was low confidence.")
+        col_matches = self._match_clue_regions(gray, expected_cols, templates, axis="col")
         if col_matches is None:
-            warnings.append("Template column clue matching was low confidence; using grid-aligned column clues.")
-            accepted_cols = expected_cols
-        else:
-            accepted_cols = self._accept_template_clue_matches(
-                expected_cols,
-                col_matches,
-                board,
-                axis="col",
-                warnings=warnings,
-            )
-            if accepted_cols is not None:
-                col_method = "template-clue"
-            else:
-                accepted_cols = expected_cols
+            raise ValueError("Template column clue matching was low confidence.")
 
-        row_matches = sorted(accepted_rows, key=lambda region: region.y)
-        col_matches = sorted(accepted_cols, key=lambda region: region.x)
+        accepted_rows = self._accept_template_clue_matches(expected_rows, row_matches, board, axis="row")
+        accepted_cols = self._accept_template_clue_matches(expected_cols, col_matches, board, axis="col")
+
+        sorted_rows = sorted(accepted_rows, key=lambda region: region.y)
+        sorted_cols = sorted(accepted_cols, key=lambda region: region.x)
 
         merged: list[Region] = []
         for region in regions:
             if region.name.startswith("r") and region.name[1:].isdigit():
-                idx = int(region.name[1:])
-                merged.append(row_matches[idx])
+                merged.append(sorted_rows[int(region.name[1:])])
                 continue
             if region.name.startswith("c") and region.name[1:].isdigit():
-                idx = int(region.name[1:])
-                merged.append(col_matches[idx])
+                merged.append(sorted_cols[int(region.name[1:])])
                 continue
             merged.append(region)
 
-        return merged, row_method, col_method
+        return merged
 
     def _accept_template_clue_matches(
         self,
@@ -729,13 +692,11 @@ class ScreenBoardParser:
         board: tuple[int, int, int, int],
         *,
         axis: str,
-        warnings: list[str],
-    ) -> list[Region] | None:
+    ) -> list[Region]:
         if len(expected_regions) != len(candidate_regions):
-            warnings.append(
-                f"Rejected template {axis} clue matches due to count mismatch; using grid-aligned {axis} clues."
+            raise ValueError(
+                f"Rejected template {axis} clue matches due to count mismatch."
             )
-            return None
 
         sort_key = (lambda region: region.y) if axis == "row" else (lambda region: region.x)
         expected_sorted = sorted(expected_regions, key=sort_key)
@@ -758,20 +719,18 @@ class ScreenBoardParser:
                 primary_tol = max(4.0, expected.h * 0.40)
                 secondary_tol = max(8.0, expected.w * 0.85)
                 if candidate.x < board_right - 2:
-                    warnings.append(
-                        "Rejected template row clue matches that crossed into board area; using grid-aligned row clues."
+                    raise ValueError(
+                        "Rejected template row clue matches that crossed into board area."
                     )
-                    return None
             else:
                 primary_delta = abs(cand_cx - exp_cx)
                 secondary_delta = abs(cand_cy - exp_cy)
                 primary_tol = max(4.0, expected.w * 0.40)
                 secondary_tol = max(8.0, expected.h * 0.85)
                 if candidate.y < board_bottom - 2:
-                    warnings.append(
-                        "Rejected template column clue matches that crossed into board area; using grid-aligned column clues."
+                    raise ValueError(
+                        "Rejected template column clue matches that crossed into board area."
                     )
-                    return None
 
             width_delta = abs(candidate.w - expected.w)
             height_delta = abs(candidate.h - expected.h)
@@ -784,10 +743,9 @@ class ScreenBoardParser:
                 or width_delta > width_tol
                 or height_delta > height_tol
             ):
-                warnings.append(
-                    f"Rejected template {axis} clue matches due to large offset/scale drift; using grid-aligned {axis} clues."
+                raise ValueError(
+                    f"Rejected template {axis} clue matches due to large offset/scale drift."
                 )
-                return None
 
             accepted.append(
                 Region(
