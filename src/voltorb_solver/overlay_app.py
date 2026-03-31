@@ -741,6 +741,7 @@ class OverlayControlWindow(QMainWindow):
             (selected_region.x, selected_region.y, selected_region.w, selected_region.h),
             fast=not selected_region.name.startswith("c"),
         )
+        debug_log_path = self._write_clue_parse_debug_log(selected_region, pair)
         if pair is None:
             saved_path = self._save_failed_clue_crop(selected_region)
             if saved_path is not None:
@@ -757,7 +758,8 @@ class OverlayControlWindow(QMainWindow):
             QMessageBox.warning(
                 self,
                 "Parse Single Clue",
-                "Could not confidently parse this clue box. Try a tighter crop and good contrast.",
+                "Could not confidently parse this clue box. Try a tighter crop and good contrast.\n"
+                f"Debug log: {debug_log_path}",
             )
             return
 
@@ -765,8 +767,32 @@ class OverlayControlWindow(QMainWindow):
         QMessageBox.information(
             self,
             "Parse Single Clue",
-            f"Parsed {selected_region.name}: voltorbs={voltorbs}, total={total}",
+            f"Parsed {selected_region.name}: voltorbs={voltorbs}, total={total}\n"
+            f"Debug log: {debug_log_path}",
         )
+
+    def _write_clue_parse_debug_log(
+        self,
+        region: Region,
+        pair: tuple[int, int] | None,
+    ) -> Path:
+        log_dir = self._clue_dataset_root / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        source_stem = Path(self.state.last_input_path or "unknown_source").stem
+        out_path = log_dir / f"{ts}_{source_stem}_{region.name}.log"
+
+        debug_lines = list(getattr(self.clue_parser, "last_clue_debug", []))
+        header = [
+            f"timestamp={datetime.now().isoformat(timespec='seconds')}",
+            f"source={self.state.last_input_path}",
+            f"region={region.name}",
+            f"box=({region.x},{region.y},{region.w},{region.h})",
+            f"parsed={pair}",
+            "--- trace ---",
+        ]
+        out_path.write_text("\n".join(header + debug_lines) + "\n", encoding="utf-8")
+        return out_path
 
     def _save_failed_clue_crop(self, region: Region) -> Path | None:
         if self.state.last_input_path is None:

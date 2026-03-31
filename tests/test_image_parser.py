@@ -86,7 +86,7 @@ def test_parse_clue_box_returns_pair_with_stubbed_parser(monkeypatch, tmp_path: 
     monkeypatch.setattr(parser_module, "cv2", fake_cv2)
     monkeypatch.setattr(parser_module, "pytesseract", fake_pytesseract)
     monkeypatch.setattr(parser, "_configure_tesseract_runtime", lambda: True)
-    monkeypatch.setattr(parser, "_parse_clue_rects", lambda _img, _rects: [(2, 10)])
+    monkeypatch.setattr(parser, "_ocr_number_field", lambda *_args, **_kwargs: 2 if _kwargs["field_name"] == "voltorbs" else 10)
 
     result = parser.parse_clue_box(str(image_path))
 
@@ -97,12 +97,14 @@ def test_parse_clue_box_returns_none_when_unreadable(monkeypatch) -> None:
     parser = ImageParser()
 
     fake_cv2 = types.SimpleNamespace()
+    fake_cv2.COLOR_BGR2GRAY = 2
+    fake_cv2.cvtColor = lambda img, _code: img
     fake_pytesseract = types.SimpleNamespace()
 
     monkeypatch.setattr(parser_module, "cv2", fake_cv2)
     monkeypatch.setattr(parser_module, "pytesseract", fake_pytesseract)
     monkeypatch.setattr(parser, "_configure_tesseract_runtime", lambda: True)
-    monkeypatch.setattr(parser, "_parse_clue_rects", lambda _img, _rects: [None])
+    monkeypatch.setattr(parser, "_ocr_number_field", lambda *_args, **_kwargs: None)
 
     arr = np.zeros((32, 32, 3), dtype=np.uint8)
     result = parser.parse_clue_box(arr)

@@ -23,6 +23,11 @@ try:
 except Exception:  # pragma: no cover - optional runtime dependency behavior
     pytesseract = None
 
+try:
+    from paddleocr import PaddleOCR  # type: ignore
+except Exception:  # pragma: no cover - optional runtime dependency behavior
+    PaddleOCR = None
+
 
 @dataclass(slots=True)
 class ParseResult:
@@ -38,6 +43,42 @@ class ImageParser:
     _VOLTORB_TOKEN_BOUNDS = (0.40, 0.50, 0.98, 0.98)
     _TOTAL_OCR_BOUNDS = (0.10, 0.02, 0.95, 0.42)
     _VOLTORB_OCR_BOUNDS = (0.58, 0.50, 0.98, 0.98)
+
+    def _clue_ocr_backend_order(self) -> list[str]:
+        configured = os.environ.get("VOLTORB_CLUE_OCR_BACKEND", "auto").strip().lower()
+        if configured == "paddle":
+            return ["paddle", "tesseract"]
+        if configured == "tesseract":
+            return ["tesseract", "paddle"]
+        return ["paddle", "tesseract"]
+
+    def _get_paddle_reader(self):
+        unavailable = getattr(self, "_paddle_ocr_unavailable", False)
+        if unavailable:
+            return None
+
+        reader = getattr(self, "_paddle_ocr_reader", None)
+        if reader is not None:
+            return reader
+
+        if PaddleOCR is None:
+            self._paddle_ocr_unavailable = True
+            return None
+
+        try:
+            reader = PaddleOCR(use_angle_cls=False, lang="en", show_log=False)
+        except TypeError:
+            try:
+                reader = PaddleOCR(use_angle_cls=False, lang="en")
+            except Exception:
+                self._paddle_ocr_unavailable = True
+                return None
+        except Exception:
+            self._paddle_ocr_unavailable = True
+            return None
+
+        self._paddle_ocr_reader = reader
+        return reader
 
     def extract_clue_crop(
         self,
@@ -107,34 +148,285 @@ class ImageParser:
         return self.parse_clue_box(crop, fast=fast)
 
     def parse_clue_box(self, image: str | np.ndarray, *, fast: bool = True) -> tuple[int, int] | None:
-        if cv2 is None or pytesseract is None:
+        debug_lines: list[str] = [
+            f"parse_clue_box fast={fast}",
+        ]
+        cv_img = self._to_cv_image(image)
+        if cv_img is None or cv2 is None:
+            debug_lines.append("image_unavailable_or_dependencies_missing")
+            self.last_clue_debug = debug_lines
             return None
 
-        if not self._configure_tesseract_runtime():
+        img_h, img_w = cv_img.shape[:2]
+        debug_lines[0] = f"parse_clue_box fast={fast} shape={img_w}x{img_h}"
+        debug_lines.append(f"backend_order={self._clue_ocr_backend_order()}")
+
+        split = self.split_clue_fields(cv_img)
+        if split is None:
+            debug_lines.append("split_clue_fields_failed")
+            self.last_clue_debug = debug_lines
+            return None
+
+        voltorbs_roi, total_roi = split
+        voltorbs = self._ocr_number_field(
+            voltorbs_roi,
+            min_value=0,
+            max_value=5,
+            fast=fast,
+            field_name="voltorbs",
+            debug_lines=debug_lines,
+        )
+        total = self._ocr_number_field(
+            total_roi,
+            min_value=0,
+            max_value=15,
+            fast=fast,
+            field_name="total",
+            debug_lines=debug_lines,
+        )
+
+        pair: tuple[int, int] | None = None
+        if voltorbs is not None and total is not None:
+            candidate = (voltorbs, total)
+            if self._is_plausible_clue(*candidate):
+                pair = candidate
+                debug_lines.append(f"candidate_pair={candidate} accepted")
+            else:
+                debug_lines.append(f"candidate_pair={candidate} rejected_plausibility")
+        else:
+            debug_lines.append(f"candidate_missing voltorbs={voltorbs} total={total}")
+
+        debug_lines.append(f"final_pair={pair}")
+        self.last_clue_debug = debug_lines
+        return pair
+
+    def _to_cv_image(self, image: str | np.ndarray) -> np.ndarray | None:
+        if cv2 is None:
             return None
 
         if isinstance(image, str):
             pil_image = Image.open(image).convert("RGB")
-            cv_img = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
-        else:
-            cv_img = image.copy()
-            if cv_img.ndim == 2:
-                cv_img = np.dstack([cv_img, cv_img, cv_img])
-            elif cv_img.ndim != 3 or cv_img.shape[2] < 3:
-                return None
+            return cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
 
-        img_h, img_w = cv_img.shape[:2]
-        if img_h <= 0 or img_w <= 0:
+        cv_img = image.copy()
+        if cv_img.ndim == 2:
+            cv_img = np.dstack([cv_img, cv_img, cv_img])
+        elif cv_img.ndim != 3 or cv_img.shape[2] < 3:
+            return None
+        return cv_img
+
+    def _ocr_number_field(
+        self,
+        roi: np.ndarray,
+        *,
+        min_value: int,
+        max_value: int,
+        fast: bool,
+        field_name: str,
+        debug_lines: list[str] | None = None,
+    ) -> int | None:
+        if cv2 is None or roi.size == 0:
+            if debug_lines is not None:
+                debug_lines.append(f"field={field_name} unavailable")
             return None
 
-        sample_offsets = [(0, 0), (-1, 0), (1, 0), (0, -1), (0, 1)] if fast else None
-        pair = self._parse_clue_rects(
-            cv_img,
-            [(0, 0, img_w, img_h)],
-            sample_offsets=sample_offsets,
-            fast_ocr=fast,
-        )[0]
-        return pair
+        backends = self._clue_ocr_backend_order()
+        if debug_lines is not None:
+            debug_lines.append(f"field={field_name} backends={backends}")
+
+        best_value: int | None = None
+        best_score = -1.0
+        for backend in backends:
+            if backend == "paddle":
+                value, score = self._ocr_number_field_paddle(
+                    roi,
+                    min_value=min_value,
+                    max_value=max_value,
+                    field_name=field_name,
+                    debug_lines=debug_lines,
+                )
+            else:
+                value, score = self._ocr_number_field_tesseract(
+                    roi,
+                    min_value=min_value,
+                    max_value=max_value,
+                    fast=fast,
+                    field_name=field_name,
+                    debug_lines=debug_lines,
+                )
+
+            if value is not None and score > best_score:
+                best_value = value
+                best_score = score
+
+        if debug_lines is not None:
+            if best_value is None:
+                debug_lines.append(f"field={field_name} result=None")
+            else:
+                debug_lines.append(f"field={field_name} winner={best_value} score={best_score:.2f}")
+        return best_value
+
+    def _ocr_number_field_tesseract(
+        self,
+        roi: np.ndarray,
+        *,
+        min_value: int,
+        max_value: int,
+        fast: bool,
+        field_name: str,
+        debug_lines: list[str] | None = None,
+    ) -> tuple[int | None, float]:
+        if pytesseract is None:
+            if debug_lines is not None:
+                debug_lines.append(f"field={field_name} backend=tesseract unavailable")
+            return None, -1.0
+
+        if not self._configure_tesseract_runtime():
+            if debug_lines is not None:
+                debug_lines.append(f"field={field_name} backend=tesseract runtime_unavailable")
+            return None, -1.0
+
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        nearest = cv2.resize(gray, None, fx=6.0, fy=6.0, interpolation=cv2.INTER_NEAREST)
+        variants = [
+            ("nearest", nearest),
+            ("otsu", cv2.threshold(nearest, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]),
+        ]
+        if not fast:
+            variants.append(
+                ("otsu_inv", cv2.threshold(nearest, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1])
+            )
+
+        psm_modes = (10, 8) if fast else (10, 8, 7)
+        config_base = "--oem 3 -c tessedit_char_whitelist=0123456789"
+        scores: dict[int, float] = {}
+
+        for variant_name, variant in variants:
+            for psm in psm_modes:
+                try:
+                    data = pytesseract.image_to_data(
+                        variant,
+                        output_type=pytesseract.Output.DICT,
+                        config=f"{config_base} --psm {psm}",
+                    )
+                except Exception:
+                    continue
+
+                texts = data.get("text", [])
+                confs = data.get("conf", [])
+                count = min(len(texts), len(confs))
+                for i in range(count):
+                    text = str(texts[i]).strip()
+                    if not text:
+                        continue
+
+                    try:
+                        confidence = float(confs[i])
+                    except Exception:
+                        confidence = -1.0
+
+                    digits = re.findall(r"\d+", text)
+                    if not digits:
+                        continue
+
+                    token = digits[0]
+                    value = int(token)
+                    weight = max(1.0, confidence if confidence > 0 else 1.0)
+                    if min_value <= value <= max_value:
+                        scores[value] = scores.get(value, 0.0) + weight
+
+                    if len(token) == 2 and token.startswith("1"):
+                        short_value = int(token[1])
+                        if min_value <= short_value <= max_value:
+                            scores[short_value] = scores.get(short_value, 0.0) + weight * 0.6
+
+                    if token == "10" and min_value == 0:
+                        scores[0] = scores.get(0, 0.0) + weight * 0.6
+
+                if debug_lines is not None:
+                    debug_lines.append(
+                        "field="
+                        f"{field_name} backend=tesseract variant={variant_name} psm={psm} "
+                        f"partial_scores={dict(sorted(scores.items()))}"
+                    )
+
+        if not scores:
+            return None, -1.0
+
+        value, score = max(scores.items(), key=lambda item: item[1])
+        return value, float(score)
+
+    def _ocr_number_field_paddle(
+        self,
+        roi: np.ndarray,
+        *,
+        min_value: int,
+        max_value: int,
+        field_name: str,
+        debug_lines: list[str] | None = None,
+    ) -> tuple[int | None, float]:
+        reader = self._get_paddle_reader()
+        if reader is None:
+            if debug_lines is not None:
+                debug_lines.append(f"field={field_name} backend=paddle unavailable")
+            return None, -1.0
+
+        rgb = cv2.cvtColor(roi, cv2.COLOR_BGR2RGB)
+        try:
+            result = reader.ocr(rgb, det=False, rec=True, cls=False)
+        except Exception:
+            if debug_lines is not None:
+                debug_lines.append(f"field={field_name} backend=paddle ocr_exception")
+            return None, -1.0
+
+        texts: list[tuple[str, float]] = []
+
+        def _collect(payload) -> None:
+            if isinstance(payload, (list, tuple)):
+                if len(payload) == 2 and isinstance(payload[0], str):
+                    try:
+                        conf = float(payload[1])
+                    except Exception:
+                        conf = 0.0
+                    texts.append((payload[0], conf))
+                    return
+                for item in payload:
+                    _collect(item)
+
+        _collect(result)
+
+        if debug_lines is not None:
+            debug_lines.append(f"field={field_name} backend=paddle raw={texts}")
+
+        scores: dict[int, float] = {}
+        for text, conf in texts:
+            digits = re.findall(r"\d+", str(text))
+            if not digits:
+                continue
+            token = digits[0]
+            value = int(token)
+            weight = max(1.0, conf * 100.0)
+            if min_value <= value <= max_value:
+                scores[value] = scores.get(value, 0.0) + weight
+
+            if len(token) == 2 and token.startswith("1"):
+                short_value = int(token[1])
+                if min_value <= short_value <= max_value:
+                    scores[short_value] = scores.get(short_value, 0.0) + weight * 0.6
+
+            if token == "10" and min_value == 0:
+                scores[0] = scores.get(0, 0.0) + weight * 0.6
+
+        if debug_lines is not None:
+            debug_lines.append(
+                f"field={field_name} backend=paddle partial_scores={dict(sorted(scores.items()))}"
+            )
+
+        if not scores:
+            return None, -1.0
+
+        value, score = max(scores.items(), key=lambda item: item[1])
+        return value, float(score)
 
     def _crop_by_bounds(
         self,
@@ -404,6 +696,7 @@ class ImageParser:
         rects: list[tuple[int, int, int, int]],
         sample_offsets: list[tuple[int, int]] | None = None,
         fast_ocr: bool = False,
+        debug_lines: list[str] | None = None,
     ) -> list[tuple[int, int] | None]:
         pairs: list[tuple[int, int] | None] = []
         img_h, img_w = cv_img.shape[:2]
@@ -444,17 +737,25 @@ class ImageParser:
 
         for x, y, w, h in rects:
             candidates: list[tuple[int, int]] = []
+            if debug_lines is not None:
+                debug_lines.append(f"rect=({x},{y},{w},{h})")
 
-            for dx, dy in sample_offsets:
+            for sample_idx, (dx, dy) in enumerate(sample_offsets):
                 sx, sy, sw, sh = self._clip_rect(x + dx, y + dy, w, h, img_w, img_h)
                 roi = cv_img[sy : sy + sh, sx : sx + sw]
                 if roi.size == 0:
+                    if debug_lines is not None:
+                        debug_lines.append(f"sample[{sample_idx}] offset=({dx},{dy}) roi=empty")
                     continue
 
                 top_token_roi = self._crop_by_bounds(roi, self._TOTAL_TOKEN_BOUNDS)
                 bottom_token_roi = self._crop_by_bounds(roi, self._VOLTORB_TOKEN_BOUNDS)
                 top_token = self._read_pixel_token(top_token_roi)
                 bottom_token = self._read_pixel_token(bottom_token_roi)
+                if debug_lines is not None:
+                    debug_lines.append(
+                        f"sample[{sample_idx}] offset=({dx},{dy}) tokens: top='{top_token}' bottom='{bottom_token}'"
+                    )
 
                 token_total = top_token_map.get(top_token)
                 token_voltorbs = bottom_token_map.get(bottom_token)
@@ -462,6 +763,14 @@ class ImageParser:
                     token_pair = (token_voltorbs, token_total)
                     if self._is_plausible_clue(*token_pair):
                         candidates.append(token_pair)
+                        if debug_lines is not None:
+                            debug_lines.append(
+                                f"sample[{sample_idx}] token_pair={token_pair} accepted"
+                            )
+                    elif debug_lines is not None:
+                        debug_lines.append(
+                            f"sample[{sample_idx}] token_pair={token_pair} rejected_plausibility"
+                        )
                     continue
 
                 top_roi = self._crop_by_bounds(roi, self._TOTAL_OCR_BOUNDS)
@@ -473,25 +782,44 @@ class ImageParser:
                     total = self._ocr_number_pixel_token(top_roi, min_value=0, max_value=15, kind="top")
                 if voltorbs is None:
                     voltorbs = self._ocr_number_pixel_token(bottom_roi, min_value=0, max_value=5, kind="bottom")
+                if debug_lines is not None:
+                    debug_lines.append(
+                        f"sample[{sample_idx}] ocr: voltorbs={voltorbs} total={total}"
+                    )
 
                 if total is None or voltorbs is None:
+                    if debug_lines is not None:
+                        debug_lines.append(f"sample[{sample_idx}] skipped_missing_value")
                     continue
 
                 ocr_pair = (voltorbs, total)
                 if self._is_plausible_clue(*ocr_pair):
                     candidates.append(ocr_pair)
+                    if debug_lines is not None:
+                        debug_lines.append(f"sample[{sample_idx}] ocr_pair={ocr_pair} accepted")
+                elif debug_lines is not None:
+                    debug_lines.append(f"sample[{sample_idx}] ocr_pair={ocr_pair} rejected_plausibility")
 
             if not candidates:
                 pairs.append(None)
+                if debug_lines is not None:
+                    debug_lines.append("candidates=[] -> result=None")
                 continue
 
             votes = Counter(candidates)
             (winner, count) = max(votes.items(), key=lambda item: item[1])
+            if debug_lines is not None:
+                debug_lines.append(f"candidates={candidates}")
+                debug_lines.append(f"votes={dict(votes)} winner={winner} count={count}")
             # Require either majority agreement or at least 2 votes for the winner.
             if count >= 2 or len(votes) == 1:
                 pairs.append(winner)
+                if debug_lines is not None:
+                    debug_lines.append(f"accepted_winner={winner}")
             else:
                 pairs.append(None)
+                if debug_lines is not None:
+                    debug_lines.append("winner_rejected_low_agreement")
 
         return pairs
 
