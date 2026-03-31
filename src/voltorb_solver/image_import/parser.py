@@ -156,6 +156,8 @@ class ImageParser:
         raw_total_path = run_dir / "raw_total.png"
         preprocessed_voltorbs_path = run_dir / "preprocessed_voltorbs_bw.png"
         preprocessed_total_path = run_dir / "preprocessed_total_bw.png"
+        upscaled_voltorbs_path = run_dir / "upscaled_voltorbs_bw.png"
+        upscaled_total_path = run_dir / "upscaled_total_bw.png"
         log_path = run_dir / "debug.log"
 
         cv2.imwrite(str(raw_voltorbs_path), voltorbs_roi)
@@ -166,9 +168,14 @@ class ImageParser:
         cv2.imwrite(str(preprocessed_voltorbs_path), voltorbs_pre)
         cv2.imwrite(str(preprocessed_total_path), total_pre)
 
+        voltorbs_upscaled = cv2.resize(voltorbs_pre, None, fx=6.0, fy=6.0, interpolation=cv2.INTER_NEAREST)
+        total_upscaled = cv2.resize(total_pre, None, fx=6.0, fy=6.0, interpolation=cv2.INTER_NEAREST)
+        cv2.imwrite(str(upscaled_voltorbs_path), voltorbs_upscaled)
+        cv2.imwrite(str(upscaled_total_path), total_upscaled)
+
         ocr_config = "--psm 6"
-        voltorbs_text = pytesseract.image_to_string(voltorbs_pre, config=ocr_config).strip()
-        total_text = pytesseract.image_to_string(total_pre, config=ocr_config).strip()
+        voltorbs_text = pytesseract.image_to_string(voltorbs_upscaled, config=ocr_config).strip()
+        total_text = pytesseract.image_to_string(total_upscaled, config=ocr_config).strip()
 
         voltorbs_value = self._extract_first_int(voltorbs_text)
         total_value = self._extract_first_int(total_text)
@@ -178,6 +185,8 @@ class ImageParser:
             f"source={image_path}",
             f"region={region_name}",
             f"clue_box=({x},{y},{w},{h})",
+            f"upscaled_voltorbs={upscaled_voltorbs_path}",
+            f"upscaled_total={upscaled_total_path}",
             f"tesseract_config={ocr_config}",
             f"voltorbs_text={voltorbs_text!r}",
             f"total_text={total_text!r}",

@@ -202,9 +202,11 @@ def test_debug_parse_clue_from_screenshot_writes_artifacts_and_log(monkeypatch, 
     fake_cv2.COLOR_BGR2GRAY = 1
     fake_cv2.THRESH_BINARY_INV = 2
     fake_cv2.THRESH_OTSU = 4
+    fake_cv2.INTER_NEAREST = 5
     fake_cv2.imread = lambda _path: np.zeros((80, 100, 3), dtype=np.uint8)
     fake_cv2.cvtColor = lambda img, _code: img[:, :, 0]
     fake_cv2.threshold = lambda img, _a, _b, _c: (0, img)
+    fake_cv2.resize = lambda img, _size, fx, fy, interpolation: img
     fake_cv2.imwrite = lambda path, _img: written.append(path) or True
 
     ocr_calls: list[str] = []
@@ -227,7 +229,7 @@ def test_debug_parse_clue_from_screenshot_writes_artifacts_and_log(monkeypatch, 
     )
 
     assert artifacts is not None
-    assert len(written) == 4
+    assert len(written) == 6
     assert artifacts.voltorbs_value == 2
     assert artifacts.total_value == 10
     assert artifacts.log_path.exists()
@@ -242,6 +244,8 @@ def test_debug_parse_clue_from_screenshot_writes_artifacts_and_log(monkeypatch, 
 
     log_text = artifacts.log_path.read_text(encoding="utf-8")
     assert "region=r2" in log_text
+    assert "upscaled_voltorbs=" in log_text
+    assert "upscaled_total=" in log_text
     assert "voltorbs_text='2'" in log_text
     assert "total_text='10'" in log_text
-    assert "tesseract_config=--oem 3 --psm 10 -c tessedit_char_whitelist=0123456789" in log_text
+    assert "tesseract_config=--psm 6" in log_text
