@@ -201,7 +201,7 @@ def test_debug_parse_clue_from_screenshot_writes_artifacts_and_log(monkeypatch, 
     )
 
     assert artifacts is not None
-    assert len(written) >= 20
+    assert len(written) >= 6
     assert artifacts.voltorbs_value == 2
     assert artifacts.total_value == 2
     assert artifacts.log_path.exists()
@@ -218,8 +218,6 @@ def test_debug_parse_clue_from_screenshot_writes_artifacts_and_log(monkeypatch, 
 
     log_text = artifacts.log_path.read_text(encoding="utf-8")
     assert "region=r2" in log_text
-    assert "upscaled_voltorbs=" in log_text
-    assert "upscaled_total=" in log_text
     assert "voltorbs_text='template:2'" in log_text
     assert "total_text='template:2'" in log_text
     assert "tesseract_configs=['template']" in log_text

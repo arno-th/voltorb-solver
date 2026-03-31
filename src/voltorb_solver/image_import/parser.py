@@ -55,7 +55,7 @@ class ImageParser:
     _VOLTORB_TOKEN_BOUNDS = (0.615, 0.50, 0.99, 0.98)
     _VOLTORB_OCR_BOUNDS = (0.615, 0.50, 0.99, 0.98)
 
-    _TEMPLATE_MIN_SCORE = 0.66
+    _TEMPLATE_MIN_SCORE = 0.90
 
     def __init__(self) -> None:
         self._templates_loaded = False
@@ -101,14 +101,7 @@ class ImageParser:
             return None
         x0, x1 = int(xs.min()), int(xs.max()) + 1
         y0, y1 = int(ys.min()), int(ys.max()) + 1
-        glyph = bw[y0:y1, x0:x1]
-
-        side = max(glyph.shape[0], glyph.shape[1])
-        canvas = np.zeros((side, side), dtype=np.uint8)
-        y_off = (side - glyph.shape[0]) // 2
-        x_off = (side - glyph.shape[1]) // 2
-        canvas[y_off : y_off + glyph.shape[0], x_off : x_off + glyph.shape[1]] = glyph
-        return cv2.resize(canvas, (32, 32), interpolation=cv2.INTER_NEAREST)
+        return bw[y0:y1, x0:x1]
 
     def _load_clue_templates(self) -> None:
         if self._templates_loaded or cv2 is None:
@@ -347,8 +340,6 @@ class ImageParser:
         preprocessed_total_path = run_dir / "preprocessed_total_bw.png"
         preprocessed_voltorbs_inv_path = run_dir / "preprocessed_voltorbs_bw_inv.png"
         preprocessed_total_inv_path = run_dir / "preprocessed_total_bw_inv.png"
-        upscaled_voltorbs_path = run_dir / "upscaled_voltorbs_bw.png"
-        upscaled_total_path = run_dir / "upscaled_total_bw.png"
         log_path = run_dir / "debug.log"
 
         cv2.imwrite(str(raw_voltorbs_path), voltorbs_roi)
@@ -362,11 +353,6 @@ class ImageParser:
         total_pre_inv = 255 - total_pre
         cv2.imwrite(str(preprocessed_voltorbs_inv_path), voltorbs_pre_inv)
         cv2.imwrite(str(preprocessed_total_inv_path), total_pre_inv)
-
-        voltorbs_upscaled = cv2.resize(voltorbs_pre, None, fx=6.0, fy=6.0, interpolation=cv2.INTER_NEAREST)
-        total_upscaled = cv2.resize(total_pre, None, fx=6.0, fy=6.0, interpolation=cv2.INTER_NEAREST)
-        cv2.imwrite(str(upscaled_voltorbs_path), voltorbs_upscaled)
-        cv2.imwrite(str(upscaled_total_path), total_upscaled)
 
         voltorbs_inputs = self._build_debug_ocr_inputs(
             run_dir=run_dir,
@@ -403,8 +389,6 @@ class ImageParser:
             f"run_id={run_id}",
             f"region={region_name}",
             f"clue_box=({x},{y},{w},{h})",
-            f"upscaled_voltorbs={upscaled_voltorbs_path}",
-            f"upscaled_total={upscaled_total_path}",
             f"tesseract_configs={ocr_configs}",
             f"voltorbs_text={voltorbs_text!r}",
             f"total_text={total_text!r}",
@@ -527,16 +511,7 @@ class ImageParser:
         normal: np.ndarray,
         inverted: np.ndarray,
     ) -> list[tuple[str, np.ndarray]]:
-        inputs: list[tuple[str, np.ndarray]] = []
-        for polarity, image in (("normal", normal), ("inverted", inverted)):
-            for scale in (4, 6, 8):
-                upscaled = cv2.resize(image, None, fx=float(scale), fy=float(scale), interpolation=cv2.INTER_NEAREST)
-                bordered = np.pad(upscaled, ((10, 10), (10, 10)), mode="constant", constant_values=255)
-                label = f"{field_name}_{polarity}_{scale}x_border"
-                out_path = run_dir / f"ocr_input_{label}.png"
-                cv2.imwrite(str(out_path), bordered)
-                inputs.append((label, bordered))
-        return inputs
+        return [(f"{field_name}_normal", normal), (f"{field_name}_inverted", inverted)]
 
     def _run_debug_ocr_configs(
         self,
