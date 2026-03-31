@@ -39,23 +39,24 @@ class ParseResult:
 class ClueDebugArtifacts:
     raw_voltorbs_path: Path
     raw_total_path: Path
-    preprocessed_voltorbs_path: Path
-    preprocessed_total_path: Path
+    normalized_voltorbs_path: Path
+    normalized_total_path: Path
     log_path: Path
     voltorbs_text: str
     total_text: str
     voltorbs_value: int | None
     total_value: int | None
+    voltorbs_score: float
+    total_score: float
 
 
 class ImageParser:
     # Normalized clue-field bounds (x0, y0, x1, y1) inside a single clue box.
-    _TOTAL_TOKEN_BOUNDS = (0.30, 0.02, 0.99, 0.42)
+    # Used by overlay_app.py to generate debug sub-region overlays.
     _TOTAL_OCR_BOUNDS = (0.30, 0.02, 0.99, 0.42)
-    _VOLTORB_TOKEN_BOUNDS = (0.615, 0.50, 0.99, 0.98)
     _VOLTORB_OCR_BOUNDS = (0.615, 0.50, 0.99, 0.98)
 
-    _TEMPLATE_MIN_SCORE = 0.90
+    _TEMPLATE_MIN_SCORE = 0.85
 
     def __init__(self) -> None:
         self._templates_loaded = False
@@ -86,12 +87,25 @@ class ImageParser:
             return None
         return voltorbs, total
 
-    def _prepare_template_image(self, roi: np.ndarray) -> np.ndarray | None:
+    def _binarize(self, roi: np.ndarray) -> np.ndarray | None:
+        """Otsu threshold on the per-pixel channel maximum; returns full-size binary image (no crop).
+
+        Digit strokes are dark gray (all BGR channels ≈ 65) while clue-box backgrounds
+        are always colored — orange (R≈227), green (G≈170), etc.  Taking max(B, G, R)
+        for each pixel gives ≈65 at digit locations regardless of the background hue,
+        so global Otsu reliably separates digits from the background without being
+        confused by which color the background uses.  Falls back to the raw array when
+        the input is already single-channel.
+        """
         if cv2 is None or roi.size == 0:
             return None
-        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY) if roi.ndim == 3 else roi
-        bw = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
+        channel = np.max(roi, axis=2) if roi.ndim == 3 else roi
+        return cv2.threshold(channel, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
 
+    def _prepare_template_image(self, roi: np.ndarray) -> np.ndarray | None:
+        bw = self._binarize(roi)
+        if bw is None:
+            return None
         # Normalize polarity so foreground digits are white on black for stable matching.
         if int(np.count_nonzero(bw)) > (bw.size // 2):
             bw = 255 - bw
@@ -178,8 +192,8 @@ class ImageParser:
             return None, -1.0
 
         self._load_clue_templates()
-        normalized = self._prepare_template_image(roi)
-        if normalized is None:
+        bw = self._binarize(roi)
+        if bw is None:
             if save_if_unmatched:
                 self._save_unmatched_template_sample(roi, kind=kind, source_tag=source_tag)
             return None, -1.0
@@ -190,11 +204,11 @@ class ImageParser:
             if not (min_value <= value <= max_value):
                 continue
             for template in templates:
-                if template.shape != normalized.shape:
-                    resized = cv2.resize(normalized, (template.shape[1], template.shape[0]), interpolation=cv2.INTER_NEAREST)
-                else:
-                    resized = normalized
-                score = float(cv2.matchTemplate(resized, template, cv2.TM_CCOEFF_NORMED)[0, 0])
+                if template.shape[0] > bw.shape[0] or template.shape[1] > bw.shape[1]:
+                    continue
+                result = cv2.matchTemplate(bw, template, cv2.TM_CCOEFF_NORMED)
+                _, max_val, _, _ = cv2.minMaxLoc(result)
+                score = float(max_val)
                 if score > best_score:
                     best_score = score
                     best_value = value
@@ -336,51 +350,46 @@ class ImageParser:
 
         raw_voltorbs_path = run_dir / "raw_voltorbs.png"
         raw_total_path = run_dir / "raw_total.png"
-        preprocessed_voltorbs_path = run_dir / "preprocessed_voltorbs_bw.png"
-        preprocessed_total_path = run_dir / "preprocessed_total_bw.png"
-        preprocessed_voltorbs_inv_path = run_dir / "preprocessed_voltorbs_bw_inv.png"
-        preprocessed_total_inv_path = run_dir / "preprocessed_total_bw_inv.png"
+        normalized_voltorbs_path = run_dir / "normalized_voltorbs.png"
+        normalized_total_path = run_dir / "normalized_total.png"
         log_path = run_dir / "debug.log"
 
         cv2.imwrite(str(raw_voltorbs_path), voltorbs_roi)
         cv2.imwrite(str(raw_total_path), total_roi)
 
-        voltorbs_pre = self._preprocess_clue_debug_roi(voltorbs_roi)
-        total_pre = self._preprocess_clue_debug_roi(total_roi)
-        cv2.imwrite(str(preprocessed_voltorbs_path), voltorbs_pre)
-        cv2.imwrite(str(preprocessed_total_path), total_pre)
-        voltorbs_pre_inv = 255 - voltorbs_pre
-        total_pre_inv = 255 - total_pre
-        cv2.imwrite(str(preprocessed_voltorbs_inv_path), voltorbs_pre_inv)
-        cv2.imwrite(str(preprocessed_total_inv_path), total_pre_inv)
-
-        voltorbs_inputs = self._build_debug_ocr_inputs(
-            run_dir=run_dir,
-            field_name="voltorbs",
-            normal=voltorbs_pre,
-            inverted=voltorbs_pre_inv,
-        )
-        total_inputs = self._build_debug_ocr_inputs(
-            run_dir=run_dir,
-            field_name="total",
-            normal=total_pre,
-            inverted=total_pre_inv,
-        )
-
-        ocr_configs = ["template"]
-        voltorbs_text, voltorbs_value, voltorbs_attempts = self._run_debug_ocr_configs(
-            voltorbs_inputs,
-            ocr_configs,
+        voltorbs_value, voltorbs_score = self._match_number_template(
+            voltorbs_roi,
+            kind="bottom",
             min_value=0,
             max_value=5,
-            kind="bottom",
+            save_if_unmatched=True,
+            source_tag="debug:voltorbs",
         )
-        total_text, total_value, total_attempts = self._run_debug_ocr_configs(
-            total_inputs,
-            ocr_configs,
+        total_value, total_score = self._match_number_template(
+            total_roi,
+            kind="top",
             min_value=0,
             max_value=15,
-            kind="top",
+            save_if_unmatched=True,
+            source_tag="debug:total",
+        )
+
+        voltorbs_norm = self._binarize(voltorbs_roi)
+        if voltorbs_norm is not None:
+            cv2.imwrite(str(normalized_voltorbs_path), voltorbs_norm)
+        total_norm = self._binarize(total_roi)
+        if total_norm is not None:
+            cv2.imwrite(str(normalized_total_path), total_norm)
+
+        voltorbs_text = (
+            f"match:{voltorbs_value} score={voltorbs_score:.3f}"
+            if voltorbs_value is not None
+            else f"no_match score={voltorbs_score:.3f}"
+        )
+        total_text = (
+            f"match:{total_value} score={total_score:.3f}"
+            if total_value is not None
+            else f"no_match score={total_score:.3f}"
         )
 
         x, y, w, h = clue_box
@@ -389,32 +398,27 @@ class ImageParser:
             f"run_id={run_id}",
             f"region={region_name}",
             f"clue_box=({x},{y},{w},{h})",
-            f"tesseract_configs={ocr_configs}",
             f"voltorbs_text={voltorbs_text!r}",
             f"total_text={total_text!r}",
             f"voltorbs_value={voltorbs_value}",
             f"total_value={total_value}",
+            f"voltorbs_score={voltorbs_score:.3f}",
+            f"total_score={total_score:.3f}",
         ]
-        for idx, (input_label, config, text, value) in enumerate(voltorbs_attempts):
-            log_lines.append(
-                f"voltorbs_attempt[{idx}] input={input_label!r} config={config!r} text={text!r} value={value}"
-            )
-        for idx, (input_label, config, text, value) in enumerate(total_attempts):
-            log_lines.append(
-                f"total_attempt[{idx}] input={input_label!r} config={config!r} text={text!r} value={value}"
-            )
         log_path.write_text("\n".join(log_lines) + "\n", encoding="utf-8")
 
         return ClueDebugArtifacts(
             raw_voltorbs_path=raw_voltorbs_path,
             raw_total_path=raw_total_path,
-            preprocessed_voltorbs_path=preprocessed_voltorbs_path,
-            preprocessed_total_path=preprocessed_total_path,
+            normalized_voltorbs_path=normalized_voltorbs_path,
+            normalized_total_path=normalized_total_path,
             log_path=log_path,
             voltorbs_text=voltorbs_text,
             total_text=total_text,
             voltorbs_value=voltorbs_value,
             total_value=total_value,
+            voltorbs_score=voltorbs_score,
+            total_score=total_score,
         )
 
     def parse_clue_box(self, image: str | np.ndarray, *, fast: bool = True) -> tuple[int, int] | None:
@@ -455,14 +459,6 @@ class ImageParser:
             debug_lines=debug_lines,
         )
 
-        # Fallback tuned for pixel-font clue glyphs when confidence-based OCR misses a number.
-        if voltorbs is None:
-            voltorbs = self._ocr_number_pixel_token(voltorbs_roi, min_value=0, max_value=5, kind="bottom")
-            debug_lines.append(f"field=voltorbs pixel_token_fallback={voltorbs}")
-        if total is None:
-            total = self._ocr_number_pixel_token(total_roi, min_value=0, max_value=15, kind="top")
-            debug_lines.append(f"field=total pixel_token_fallback={total}")
-
         pair: tuple[int, int] | None = None
         if voltorbs is not None and total is not None:
             candidate = (voltorbs, total)
@@ -493,65 +489,11 @@ class ImageParser:
             return None
         return cv_img
 
-    def _preprocess_clue_debug_roi(self, roi: np.ndarray) -> np.ndarray:
-        grayscale_im = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-        return cv2.threshold(grayscale_im, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
-
     def _extract_first_int(self, raw_text: str) -> int | None:
         match = re.search(r"\d+", raw_text)
         if match is None:
             return None
         return int(match.group(0))
-
-    def _build_debug_ocr_inputs(
-        self,
-        *,
-        run_dir: Path,
-        field_name: str,
-        normal: np.ndarray,
-        inverted: np.ndarray,
-    ) -> list[tuple[str, np.ndarray]]:
-        return [(f"{field_name}_normal", normal), (f"{field_name}_inverted", inverted)]
-
-    def _run_debug_ocr_configs(
-        self,
-        inputs: list[tuple[str, np.ndarray]],
-        configs: list[str],
-        *,
-        min_value: int,
-        max_value: int,
-        kind: str,
-    ) -> tuple[str, int | None, list[tuple[str, str, str, int | None]]]:
-        attempts: list[tuple[str, str, str, int | None]] = []
-        chosen_text = ""
-        chosen_value: int | None = None
-        chosen_score = -1.0
-
-        for input_label, image in inputs:
-            for config in configs:
-                value, score = self._match_number_template(
-                    image,
-                    kind=kind,
-                    min_value=min_value,
-                    max_value=max_value,
-                    save_if_unmatched=False,
-                    source_tag=f"debug:{input_label}",
-                )
-                text = f"template_score={score:.4f}"
-                attempts.append((input_label, config, text, value))
-
-                if value is not None and score > chosen_score:
-                    chosen_text = f"template:{value}@{score:.3f}"
-                    chosen_value = value
-                    chosen_score = score
-
-        if chosen_value is None:
-            for _input, _config, text, _value in attempts:
-                if text:
-                    chosen_text = text
-                    break
-
-        return chosen_text, chosen_value, attempts
 
     def _ocr_number_field(
         self,
@@ -880,8 +822,8 @@ class ImageParser:
             if debug_lines is not None:
                 debug_lines.append(f"candidates={candidates}")
                 debug_lines.append(f"votes={dict(votes)} avg_scores={avg_scores} winner={winner} count={count}")
-            # Require either majority agreement or at least 2 votes for the winner.
-            if count >= 2 or len(votes) == 1:
+            # Require at least 2 independent jitter samples to agree.
+            if count >= 2:
                 pairs.append(winner)
                 if debug_lines is not None:
                     debug_lines.append(f"accepted_winner={winner}")

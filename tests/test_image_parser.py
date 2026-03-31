@@ -68,7 +68,6 @@ def test_parse_clue_box_returns_pair_with_stubbed_parser(monkeypatch, tmp_path: 
 
     monkeypatch.setattr(parser_module, "cv2", fake_cv2)
     monkeypatch.setattr(parser, "_ocr_number_field", lambda *_args, **_kwargs: 2 if _kwargs["field_name"] == "voltorbs" else 8)
-    monkeypatch.setattr(parser, "_ocr_number_pixel_token", lambda *_args, **_kwargs: None)
 
     result = parser.parse_clue_box(str(image_path))
 
@@ -83,7 +82,6 @@ def test_parse_clue_box_returns_none_when_unreadable(monkeypatch) -> None:
     fake_cv2.cvtColor = lambda img, _code: img
     monkeypatch.setattr(parser_module, "cv2", fake_cv2)
     monkeypatch.setattr(parser, "_ocr_number_field", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(parser, "_ocr_number_pixel_token", lambda *_args, **_kwargs: None)
 
     arr = np.zeros((32, 32, 3), dtype=np.uint8)
     result = parser.parse_clue_box(arr)
@@ -179,18 +177,15 @@ def test_debug_parse_clue_from_screenshot_writes_artifacts_and_log(monkeypatch, 
 
     fake_cv2 = types.SimpleNamespace()
     fake_cv2.COLOR_BGR2GRAY = 1
-    fake_cv2.THRESH_BINARY = 2
     fake_cv2.THRESH_BINARY_INV = 4
     fake_cv2.THRESH_OTSU = 8
-    fake_cv2.INTER_NEAREST = 5
     fake_cv2.imread = lambda _path: np.zeros((80, 100, 3), dtype=np.uint8)
     fake_cv2.cvtColor = lambda img, _code: img[:, :, 0]
     fake_cv2.threshold = lambda img, _a, _b, _c: (0, img)
-    fake_cv2.resize = lambda img, _size, fx, fy, interpolation: img
     fake_cv2.imwrite = lambda path, _img: written.append(path) or True
 
     monkeypatch.setattr(parser_module, "cv2", fake_cv2)
-    monkeypatch.setattr(parser, "_run_debug_ocr_configs", lambda *_args, **_kwargs: ("template:2", 2, []))
+    monkeypatch.setattr(parser, "_match_number_template", lambda *_args, **_kwargs: (2, 0.95))
 
     artifacts = parser.debug_parse_clue_from_screenshot(
         "dummy.png",
@@ -201,7 +196,7 @@ def test_debug_parse_clue_from_screenshot_writes_artifacts_and_log(monkeypatch, 
     )
 
     assert artifacts is not None
-    assert len(written) >= 6
+    assert len(written) >= 2
     assert artifacts.voltorbs_value == 2
     assert artifacts.total_value == 2
     assert artifacts.log_path.exists()
@@ -210,17 +205,16 @@ def test_debug_parse_clue_from_screenshot_writes_artifacts_and_log(monkeypatch, 
     parent_dirs = {
         artifacts.raw_voltorbs_path.parent,
         artifacts.raw_total_path.parent,
-        artifacts.preprocessed_voltorbs_path.parent,
-        artifacts.preprocessed_total_path.parent,
+        artifacts.normalized_voltorbs_path.parent,
+        artifacts.normalized_total_path.parent,
         artifacts.log_path.parent,
     }
     assert len(parent_dirs) == 1
 
     log_text = artifacts.log_path.read_text(encoding="utf-8")
     assert "region=r2" in log_text
-    assert "voltorbs_text='template:2'" in log_text
-    assert "total_text='template:2'" in log_text
-    assert "tesseract_configs=['template']" in log_text
+    assert "voltorbs_text='template:2@0.950'" in log_text
+    assert "total_text='template:2@0.950'" in log_text
 
 
 def test_save_unmatched_template_sample_writes_manifest(tmp_path: Path, monkeypatch) -> None:

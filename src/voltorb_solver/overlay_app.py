@@ -770,6 +770,7 @@ class OverlayControlWindow(QMainWindow):
         debug_run_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
 
         successes: list[tuple[str, Path, int | None, int | None]] = []
+        partial_matches: list[tuple[str, Path, int | None, int | None, float, float]] = []
         failures: list[str] = []
         progress = QProgressDialog("Preparing debug parse...", "Cancel", 0, len(selected_regions), self)
         progress.setWindowTitle("Parse Clue Debug")
@@ -804,15 +805,24 @@ class OverlayControlWindow(QMainWindow):
             if artifacts is None:
                 failures.append(region.name)
                 continue
-            successes.append((region.name, artifacts.log_path, artifacts.voltorbs_value, artifacts.total_value))
+            partial = artifacts.voltorbs_value is None or artifacts.total_value is None
+            if partial:
+                partial_matches.append((region.name, artifacts.log_path, artifacts.voltorbs_value, artifacts.total_value, artifacts.voltorbs_score, artifacts.total_score))
+            else:
+                successes.append((region.name, artifacts.log_path, artifacts.voltorbs_value, artifacts.total_value))
 
         progress.setValue(processed)
         progress.close()
 
-        if successes:
+        full_ok = len(successes)
+        partial_ok = len(partial_matches)
+        total_attempted = len(selected_regions) - len(failures) - (1 if canceled else 0)
+        if successes or partial_matches:
+            level = "success" if not failures and not partial_matches else "warning"
             self._set_status(
-                f"Saved clue debug artifacts for {len(successes)}/{len(selected_regions)} selected clues.",
-                level="success" if not failures else "warning",
+                f"Debug parse done: {full_ok} full, {partial_ok} partial, {len(failures)} failed"
+                f" (of {len(selected_regions)} selected).",
+                level=level,
             )
         elif failures:
             self._set_status(
@@ -825,25 +835,46 @@ class OverlayControlWindow(QMainWindow):
         summary_lines = [
             f"Run id: {debug_run_id}",
             f"Selected clues: {len(selected_regions)}",
-            f"Succeeded: {len(successes)}",
-            f"Failed: {len(failures)}",
+            f"Full match: {full_ok}",
+            f"Partial match (some fields None): {partial_ok}",
+            f"No artifacts: {len(failures)}",
             "",
         ]
         if canceled:
-            summary_lines.insert(3, f"Canceled after: {processed}/{len(selected_regions)}")
+            summary_lines.insert(5, f"Canceled after: {processed}/{len(selected_regions)}")
         for name, log_path, voltorbs, total in successes[:12]:
-            summary_lines.append(f"{name}: voltorbs={voltorbs}, total={total}")
-            summary_lines.append(f"  log: {log_path}")
+            summary_lines.append(f"[OK] {name}: total={total}, voltorbs={voltorbs}")
+            summary_lines.append(f"     log: {log_path}")
         if len(successes) > 12:
-            summary_lines.append(f"... and {len(successes) - 12} more successful clues.")
+            summary_lines.append(f"... and {len(successes) - 12} more full matches.")
+        if partial_matches:
+            summary_lines.append("")
+            summary_lines.append("--- Partial matches (template match failed for one or more fields) ---")
+            for name, log_path, voltorbs, total, vs, ts in partial_matches[:12]:
+                v_str = str(voltorbs) if voltorbs is not None else f"None(score={vs:.3f})"
+                t_str = str(total) if total is not None else f"None(score={ts:.3f})"
+                summary_lines.append(f"[PARTIAL] {name}: total={t_str}, voltorbs={v_str}")
+                summary_lines.append(f"          log: {log_path}")
+            if len(partial_matches) > 12:
+                summary_lines.append(f"... and {len(partial_matches) - 12} more partial matches.")
         if failures:
             summary_lines.append("")
-            summary_lines.append(f"Failed clues: {', '.join(failures)}")
+            summary_lines.append(f"No artifacts: {', '.join(failures)}")
+
+        summary_text = "\n".join(summary_lines)
+
+        run_dir = self._clue_dataset_root / "debug_parse" / debug_run_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        summary_log_path = run_dir / "summary.log"
+        try:
+            summary_log_path.write_text(summary_text + "\n", encoding="utf-8")
+        except OSError:
+            pass
 
         QMessageBox.information(
             self,
             "Parse Clue Debug",
-            "\n".join(summary_lines),
+            summary_text + f"\n\nLog saved: {summary_log_path}",
         )
 
     def _pick_clue_regions(self) -> list[Region] | None:
