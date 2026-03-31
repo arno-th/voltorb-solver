@@ -24,11 +24,6 @@ try:
 except Exception:  # pragma: no cover - optional runtime dependency behavior
     pytesseract = None
 
-try:
-    from paddleocr import PaddleOCR  # type: ignore
-except Exception:  # pragma: no cover - optional runtime dependency behavior
-    PaddleOCR = None
-
 
 @dataclass(slots=True)
 class ParseResult:
@@ -59,40 +54,7 @@ class ImageParser:
     _VOLTORB_OCR_BOUNDS = (0.58, 0.50, 0.98, 0.98)
 
     def _clue_ocr_backend_order(self) -> list[str]:
-        configured = os.environ.get("VOLTORB_CLUE_OCR_BACKEND", "auto").strip().lower()
-        if configured == "paddle":
-            return ["paddle", "tesseract"]
-        if configured == "tesseract":
-            return ["tesseract", "paddle"]
-        return ["paddle", "tesseract"]
-
-    def _get_paddle_reader(self):
-        unavailable = getattr(self, "_paddle_ocr_unavailable", False)
-        if unavailable:
-            return None
-
-        reader = getattr(self, "_paddle_ocr_reader", None)
-        if reader is not None:
-            return reader
-
-        if PaddleOCR is None:
-            self._paddle_ocr_unavailable = True
-            return None
-
-        try:
-            reader = PaddleOCR(use_angle_cls=False, lang="en", show_log=False)
-        except TypeError:
-            try:
-                reader = PaddleOCR(use_angle_cls=False, lang="en")
-            except Exception:
-                self._paddle_ocr_unavailable = True
-                return None
-        except Exception:
-            self._paddle_ocr_unavailable = True
-            return None
-
-        self._paddle_ocr_reader = reader
-        return reader
+        return ["tesseract"]
 
     def extract_clue_crop(
         self,
@@ -343,24 +305,15 @@ class ImageParser:
 
         best_value: int | None = None
         best_score = -1.0
-        for backend in backends:
-            if backend == "paddle":
-                value, score = self._ocr_number_field_paddle(
-                    roi,
-                    min_value=min_value,
-                    max_value=max_value,
-                    field_name=field_name,
-                    debug_lines=debug_lines,
-                )
-            else:
-                value, score = self._ocr_number_field_tesseract(
-                    roi,
-                    min_value=min_value,
-                    max_value=max_value,
-                    fast=fast,
-                    field_name=field_name,
-                    debug_lines=debug_lines,
-                )
+        for _backend in backends:
+            value, score = self._ocr_number_field_tesseract(
+                roi,
+                min_value=min_value,
+                max_value=max_value,
+                fast=fast,
+                field_name=field_name,
+                debug_lines=debug_lines,
+            )
 
             if value is not None and score > best_score:
                 best_value = value
@@ -456,78 +409,6 @@ class ImageParser:
                         f"{field_name} backend=tesseract variant={variant_name} psm={psm} "
                         f"partial_scores={dict(sorted(scores.items()))}"
                     )
-
-        if not scores:
-            return None, -1.0
-
-        value, score = max(scores.items(), key=lambda item: item[1])
-        return value, float(score)
-
-    def _ocr_number_field_paddle(
-        self,
-        roi: np.ndarray,
-        *,
-        min_value: int,
-        max_value: int,
-        field_name: str,
-        debug_lines: list[str] | None = None,
-    ) -> tuple[int | None, float]:
-        reader = self._get_paddle_reader()
-        if reader is None:
-            if debug_lines is not None:
-                debug_lines.append(f"field={field_name} backend=paddle unavailable")
-            return None, -1.0
-
-        rgb = cv2.cvtColor(roi, cv2.COLOR_BGR2RGB)
-        try:
-            result = reader.ocr(rgb, det=False, rec=True, cls=False)
-        except Exception:
-            if debug_lines is not None:
-                debug_lines.append(f"field={field_name} backend=paddle ocr_exception")
-            return None, -1.0
-
-        texts: list[tuple[str, float]] = []
-
-        def _collect(payload) -> None:
-            if isinstance(payload, (list, tuple)):
-                if len(payload) == 2 and isinstance(payload[0], str):
-                    try:
-                        conf = float(payload[1])
-                    except Exception:
-                        conf = 0.0
-                    texts.append((payload[0], conf))
-                    return
-                for item in payload:
-                    _collect(item)
-
-        _collect(result)
-
-        if debug_lines is not None:
-            debug_lines.append(f"field={field_name} backend=paddle raw={texts}")
-
-        scores: dict[int, float] = {}
-        for text, conf in texts:
-            digits = re.findall(r"\d+", str(text))
-            if not digits:
-                continue
-            token = digits[0]
-            value = int(token)
-            weight = max(1.0, conf * 100.0)
-            if min_value <= value <= max_value:
-                scores[value] = scores.get(value, 0.0) + weight
-
-            if len(token) == 2 and token.startswith("1"):
-                short_value = int(token[1])
-                if min_value <= short_value <= max_value:
-                    scores[short_value] = scores.get(short_value, 0.0) + weight * 0.6
-
-            if token == "10" and min_value == 0:
-                scores[0] = scores.get(0, 0.0) + weight * 0.6
-
-        if debug_lines is not None:
-            debug_lines.append(
-                f"field={field_name} backend=paddle partial_scores={dict(sorted(scores.items()))}"
-            )
 
         if not scores:
             return None, -1.0
