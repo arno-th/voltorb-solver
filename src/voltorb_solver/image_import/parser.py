@@ -48,10 +48,10 @@ class ClueDebugArtifacts:
 
 class ImageParser:
     # Normalized clue-field bounds (x0, y0, x1, y1) inside a single clue box.
-    _TOTAL_TOKEN_BOUNDS = (0.45, 0.02, 0.95, 0.42)
-    _VOLTORB_TOKEN_BOUNDS = (0.40, 0.50, 0.98, 0.98)
-    _TOTAL_OCR_BOUNDS = (0.10, 0.02, 0.95, 0.42)
-    _VOLTORB_OCR_BOUNDS = (0.58, 0.50, 0.98, 0.98)
+    _TOTAL_TOKEN_BOUNDS = (0.30, 0.02, 0.99, 0.42)
+    _TOTAL_OCR_BOUNDS = (0.30, 0.02, 0.99, 0.42)
+    _VOLTORB_TOKEN_BOUNDS = (0.615, 0.50, 0.99, 0.98)
+    _VOLTORB_OCR_BOUNDS = (0.615, 0.50, 0.99, 0.98)
 
     def _clue_ocr_backend_order(self) -> list[str]:
         return ["tesseract"]
