@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-import csv
 import re
 import shutil
 import subprocess
@@ -13,19 +12,13 @@ from PySide6.QtCore import Qt, QRect
 from PySide6.QtGui import QColor, QGuiApplication
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
-    QDialog,
-    QDialogButtonBox,
     QFrame,
-    QFileDialog,
     QHBoxLayout,
     QLabel,
-    QListWidget,
-    QListWidgetItem,
     QMainWindow,
     QMessageBox,
-    QInputDialog,
-    QProgressDialog,
     QPushButton,
     QVBoxLayout,
     QWidget,
@@ -331,42 +324,31 @@ class OverlayControlWindow(QMainWindow):
 
         button_row = QHBoxLayout()
         button_row.setSpacing(8)
-        self.capture_btn = QPushButton("Capture Screen")
-        self.capture_btn.setObjectName("PrimaryButton")
-        self.capture_btn.clicked.connect(self.capture_screen)
-        self.target_window_btn = QPushButton("Pick Target Window")
+        self.target_window_btn = QPushButton("Target Window")
         self.target_window_btn.setObjectName("SecondaryButton")
         self.target_window_btn.clicked.connect(self._handle_target_window_button)
-        self.load_btn = QPushButton("Load Screenshot...")
-        self.load_btn.setObjectName("SecondaryButton")
-        self.load_btn.clicked.connect(self.load_screenshot)
-        self.parse_clue_btn = QPushButton("Parse Single Clue")
-        self.parse_clue_btn.setObjectName("SecondaryButton")
-        self.parse_clue_btn.clicked.connect(self.parse_single_clue)
-        self.parse_all_clues_btn = QPushButton("Parse All Clues")
-        self.parse_all_clues_btn.setObjectName("SecondaryButton")
-        self.parse_all_clues_btn.clicked.connect(self.parse_all_clues)
-        self.parse_clue_debug_btn = QPushButton("Parse Clue Debug")
-        self.parse_clue_debug_btn.setObjectName("SecondaryButton")
-        self.parse_clue_debug_btn.clicked.connect(self.parse_clue_debug)
-        self.save_btn = QPushButton("Save Labeled Screenshot")
-        self.save_btn.setObjectName("SecondaryButton")
-        self.save_btn.clicked.connect(self.save_labeled)
-        self.relabel_btn = QPushButton("Relabel Regions")
+        self.relabel_btn = QPushButton("Label/relabel game")
         self.relabel_btn.setObjectName("SecondaryButton")
         self.relabel_btn.clicked.connect(self.relabel_regions)
-        self.clear_btn = QPushButton("Clear Overlay")
+        self.parse_all_clues_btn = QPushButton("Parse clues")
+        self.parse_all_clues_btn.setObjectName("PrimaryButton")
+        self.parse_all_clues_btn.clicked.connect(self.parse_all_clues)
+        self.clear_btn = QPushButton("Clear all")
         self.clear_btn.setObjectName("DangerButton")
         self.clear_btn.clicked.connect(self.clear_overlay)
-        button_row.addWidget(self.capture_btn)
+
+        options_row = QHBoxLayout()
+        options_row.setSpacing(8)
+        self.debug_checkbox = QCheckBox("Debug")
+        self.debug_checkbox.setObjectName("DebugCheck")
+        options_row.addWidget(self.debug_checkbox)
+        options_row.addStretch(1)
+
         button_row.addWidget(self.target_window_btn)
-        button_row.addWidget(self.load_btn)
-        button_row.addWidget(self.parse_clue_btn)
-        button_row.addWidget(self.parse_all_clues_btn)
-        button_row.addWidget(self.parse_clue_debug_btn)
-        button_row.addWidget(self.save_btn)
         button_row.addWidget(self.relabel_btn)
+        button_row.addWidget(self.parse_all_clues_btn)
         button_row.addWidget(self.clear_btn)
+        actions_layout.addLayout(options_row)
         actions_layout.addLayout(button_row)
 
         self.overlay_btn = QPushButton("Enable Overlay")
@@ -377,8 +359,8 @@ class OverlayControlWindow(QMainWindow):
         layout.addWidget(actions_card)
 
         help_text = QLabel(
-            "Tip: Pick a target emulator window for reliable repeated captures. If no target window is set,"
-            " capture uses the selected monitor."
+            "Tip: Pick a target emulator window, then press Parse All Clues to capture and parse in one step."
+            " Enable the overlay to view regions live."
         )
         help_text.setObjectName("HintLabel")
         help_text.setWordWrap(True)
@@ -550,54 +532,6 @@ class OverlayControlWindow(QMainWindow):
             return
         self.clear_target_window()
 
-    def capture_screen(self) -> None:
-        output_path = str(
-            Path(gettempdir()) / f"voltorb_overlay_capture_monitor_{self.state.selected_screen_index + 1}.png"
-        )
-        capture_signature = self._build_capture_signature()
-        relabel_reason = self._should_relabel_reason(capture_signature)
-
-        was_overlay_visible = self.overlay_btn.isChecked()
-        if was_overlay_visible:
-            self.x11_overlay.hide()
-
-        if self.state.target_window_id is not None:
-            pixmap = self._capture_window(self.state.target_window_id)
-        else:
-            screen = self._get_selected_screen()
-            if screen is None:
-                if was_overlay_visible:
-                    self.x11_overlay.show()
-                self._show_error("No monitor selected for screen capture.")
-                return
-            pixmap = screen.grabWindow(0)
-
-        if pixmap is None or pixmap.isNull() or not pixmap.save(output_path):
-            if was_overlay_visible:
-                self.x11_overlay.show()
-            target_desc = (
-                f"window #{self.state.target_window_id}"
-                if self.state.target_window_id is not None
-                else "selected monitor"
-            )
-            self._show_error(f"Failed to capture {target_desc}.")
-            return
-
-        self.state.last_input_path = output_path
-
-        if relabel_reason is None:
-            self.x11_overlay.set_mapping_rect(self._mapping_rect_for_signature(capture_signature))
-            self.x11_overlay.set_overlay_data(self._cached_regions, pixmap.width(), pixmap.height())
-            self._set_status(
-                f"Reused existing labels for {Path(output_path).name}. Monitor: {self.state.selected_screen_index + 1}.",
-                level="info",
-            )
-        else:
-            self._parse_and_apply(output_path, capture_signature=capture_signature, relabel_reason=relabel_reason)
-
-        if was_overlay_visible:
-            self.x11_overlay.show()
-
     def pick_target_window(self) -> None:
         if shutil.which("xwininfo") is None:
             self._show_error("`xwininfo` not found. Install x11-utils to use target window capture.")
@@ -703,468 +637,44 @@ class OverlayControlWindow(QMainWindow):
                     self.monitor_combo.setCurrentIndex(idx)
                 return
 
-    def load_screenshot(self) -> None:
-        selected, _ = QFileDialog.getOpenFileName(
-            self,
-            "Select Screenshot",
-            "",
-            "Images (*.png *.jpg *.jpeg *.bmp)",
-        )
-        if not selected:
-            return
-        self._parse_and_apply(
-            selected,
-            capture_signature=None,
-            relabel_reason="manual screenshot load",
-        )
-
-    def parse_single_clue(self) -> None:
-        if self.state.last_input_path is None:
-            self._show_error("Capture or load a screenshot first.")
-            return
-
-        selected_region = self._pick_clue_region()
-        if selected_region is None:
-            return
-
-        pair = self.clue_parser.parse_clue_from_screenshot(
-            self.state.last_input_path,
-            (selected_region.x, selected_region.y, selected_region.w, selected_region.h),
-            fast=not selected_region.name.startswith("c"),
-        )
-        debug_log_path = self._write_clue_parse_debug_log(selected_region, pair)
-        if pair is None:
-            saved_path = self._save_failed_clue_crop(selected_region)
-            if saved_path is not None:
-                self._append_clue_manifest(
-                    split="unknown",
-                    crop_path=saved_path,
-                    region_name=selected_region.name,
-                    source_path=self.state.last_input_path,
-                    clue_box=(selected_region.x, selected_region.y, selected_region.w, selected_region.h),
-                    parsed_value="",
-                    manual_value="",
-                )
-                self._offer_manual_label(saved_path, selected_region)
-            QMessageBox.warning(
-                self,
-                "Parse Single Clue",
-                "Could not confidently parse this clue box. Try a tighter crop and good contrast.\n"
-                f"Debug log: {debug_log_path}",
-            )
-            return
-
-        voltorbs, total = pair
-        self._clue_parsed_values[selected_region.name] = (voltorbs, total)
-        self._apply_clue_label_updates()
-        QMessageBox.information(
-            self,
-            "Parse Single Clue",
-            f"Parsed {selected_region.name}: voltorbs={voltorbs}, total={total}\n"
-            f"Debug log: {debug_log_path}",
-        )
-
-    def parse_clue_debug(self) -> None:
-        if self.state.last_input_path is None:
-            self._show_error("Capture or load a screenshot first.")
-            return
-
-        selected_regions = self._pick_clue_regions()
-        if selected_regions is None:
-            return
-
-        if not selected_regions:
-            return
-
-        debug_run_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-
-        successes: list[tuple[str, Path, int | None, int | None]] = []
-        partial_matches: list[tuple[str, Path, int | None, int | None, float, float]] = []
-        failures: list[str] = []
-        progress = QProgressDialog("Preparing debug parse...", "Cancel", 0, len(selected_regions), self)
-        progress.setWindowTitle("Parse Clue Debug")
-        progress.setWindowModality(Qt.WindowModality.WindowModal)
-        progress.setMinimumDuration(0)
-        progress.setAutoClose(False)
-        progress.setAutoReset(False)
-
-        canceled = False
-        processed = 0
-        for idx, region in enumerate(selected_regions, start=1):
-            if progress.wasCanceled():
-                canceled = True
-                break
-
-            progress.setValue(idx - 1)
-            progress.setLabelText(f"Parsing {region.name} ({idx}/{len(selected_regions)})...")
-            self._set_status(
-                f"Debug parsing {region.name} ({idx}/{len(selected_regions)})...",
-                level="info",
-            )
-            QApplication.processEvents()
-
-            artifacts = self.clue_parser.debug_parse_clue_from_screenshot(
-                self.state.last_input_path,
-                (region.x, region.y, region.w, region.h),
-                output_root=self._clue_dataset_root / "debug_parse",
-                region_name=region.name,
-                run_id=debug_run_id,
-            )
-            processed = idx
-            if artifacts is None:
-                failures.append(region.name)
-                continue
-            partial = artifacts.voltorbs_value is None or artifacts.total_value is None
-            if partial:
-                partial_matches.append((region.name, artifacts.log_path, artifacts.voltorbs_value, artifacts.total_value, artifacts.voltorbs_score, artifacts.total_score))
-            else:
-                successes.append((region.name, artifacts.log_path, artifacts.voltorbs_value, artifacts.total_value))
-
-        progress.setValue(processed)
-        progress.close()
-
-        full_ok = len(successes)
-        partial_ok = len(partial_matches)
-        total_attempted = len(selected_regions) - len(failures) - (1 if canceled else 0)
-        if successes or partial_matches:
-            level = "success" if not failures and not partial_matches else "warning"
-            self._set_status(
-                f"Debug parse done: {full_ok} full, {partial_ok} partial, {len(failures)} failed"
-                f" (of {len(selected_regions)} selected).",
-                level=level,
-            )
-        elif failures:
-            self._set_status(
-                "Debug parse failed for all selected clues. Verify OCR dependencies and clue region geometry.",
-                level="error",
-            )
-        elif canceled:
-            self._set_status("Debug parsing canceled.", level="warning")
-
-        summary_lines = [
-            f"Run id: {debug_run_id}",
-            f"Selected clues: {len(selected_regions)}",
-            f"Full match: {full_ok}",
-            f"Partial match (some fields None): {partial_ok}",
-            f"No artifacts: {len(failures)}",
-            "",
-        ]
-        if canceled:
-            summary_lines.insert(5, f"Canceled after: {processed}/{len(selected_regions)}")
-        for name, log_path, voltorbs, total in successes[:12]:
-            summary_lines.append(f"[OK] {name}: total={total}, voltorbs={voltorbs}")
-            summary_lines.append(f"     log: {log_path}")
-        if len(successes) > 12:
-            summary_lines.append(f"... and {len(successes) - 12} more full matches.")
-        if partial_matches:
-            summary_lines.append("")
-            summary_lines.append("--- Partial matches (template match failed for one or more fields) ---")
-            for name, log_path, voltorbs, total, vs, ts in partial_matches[:12]:
-                v_str = str(voltorbs) if voltorbs is not None else f"None(score={vs:.3f})"
-                t_str = str(total) if total is not None else f"None(score={ts:.3f})"
-                summary_lines.append(f"[PARTIAL] {name}: total={t_str}, voltorbs={v_str}")
-                summary_lines.append(f"          log: {log_path}")
-            if len(partial_matches) > 12:
-                summary_lines.append(f"... and {len(partial_matches) - 12} more partial matches.")
-        if failures:
-            summary_lines.append("")
-            summary_lines.append(f"No artifacts: {', '.join(failures)}")
-
-        summary_text = "\n".join(summary_lines)
-
-        run_dir = self._clue_dataset_root / "debug_parse" / debug_run_id
-        run_dir.mkdir(parents=True, exist_ok=True)
-        summary_log_path = run_dir / "summary.log"
-        try:
-            summary_log_path.write_text(summary_text + "\n", encoding="utf-8")
-        except OSError:
-            pass
-
-        QMessageBox.information(
-            self,
-            "Parse Clue Debug",
-            summary_text + f"\n\nLog saved: {summary_log_path}",
-        )
-
-    def _pick_clue_regions(self) -> list[Region] | None:
-        clue_regions = [
-            region
-            for region in self._cached_regions
-            if (region.name.startswith("r") or region.name.startswith("c")) and region.name[1:].isdigit()
-        ]
-        if not clue_regions:
-            self._show_error("No clue regions available. Capture/relabel the screenshot first.")
-            return None
-
-        clue_regions = sorted(clue_regions, key=lambda region: (region.name[0], int(region.name[1:])))
-
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Choose Clue Boxes")
-        dialog.setMinimumWidth(300)
-        layout = QVBoxLayout(dialog)
-
-        hint = QLabel("Tick clue regions to run debug parse:")
-        layout.addWidget(hint)
-
-        controls = QHBoxLayout()
-        controls.addStretch(1)
-        select_all_btn = QPushButton("Select all")
-        controls.addWidget(select_all_btn)
-        layout.addLayout(controls)
-
-        list_widget = QListWidget()
-        for region in clue_regions:
-            item = QListWidgetItem(region.name)
-            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            item.setCheckState(Qt.CheckState.Unchecked)
-            list_widget.addItem(item)
-        layout.addWidget(list_widget)
-
-        def _refresh_select_all_label() -> None:
-            all_checked = list_widget.count() > 0 and all(
-                list_widget.item(i).checkState() == Qt.CheckState.Checked
-                for i in range(list_widget.count())
-            )
-            select_all_btn.setText("Clear all" if all_checked else "Select all")
-
-        def _toggle_select_all() -> None:
-            all_checked = list_widget.count() > 0 and all(
-                list_widget.item(i).checkState() == Qt.CheckState.Checked
-                for i in range(list_widget.count())
-            )
-            target_state = Qt.CheckState.Unchecked if all_checked else Qt.CheckState.Checked
-            for i in range(list_widget.count()):
-                list_widget.item(i).setCheckState(target_state)
-            _refresh_select_all_label()
-
-        select_all_btn.clicked.connect(_toggle_select_all)
-        list_widget.itemChanged.connect(lambda _item: _refresh_select_all_label())
-        _refresh_select_all_label()
-
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-        buttons.accepted.connect(dialog.accept)
-        buttons.rejected.connect(dialog.reject)
-        layout.addWidget(buttons)
-
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return None
-
-        selected: list[Region] = []
-        for idx in range(list_widget.count()):
-            item = list_widget.item(idx)
-            if item.checkState() == Qt.CheckState.Checked:
-                selected.append(clue_regions[idx])
-        if not selected:
-            QMessageBox.information(self, "Parse Clue Debug", "No clue regions selected.")
-        return selected
-
-    def _pick_clue_region(self) -> Region | None:
-        clue_regions = [
-            region
-            for region in self._cached_regions
-            if (region.name.startswith("r") or region.name.startswith("c")) and region.name[1:].isdigit()
-        ]
-        if not clue_regions:
-            self._show_error("No clue regions available. Capture/relabel the screenshot first.")
-            return None
-
-        ordered_names = sorted(
-            (region.name for region in clue_regions),
-            key=lambda name: (name[0], int(name[1:])),
-        )
-        selected_name, ok = QInputDialog.getItem(
-            self,
-            "Choose Clue Box",
-            "Select clue region:",
-            ordered_names,
-            0,
-            False,
-        )
-        if not ok:
-            return None
-
-        selected_region = next((region for region in clue_regions if region.name == selected_name), None)
-        if selected_region is None:
-            self._show_error(f"Selected clue region `{selected_name}` is not available.")
-            return None
-        return selected_region
-
-    def _write_clue_parse_debug_log(
-        self,
-        region: Region,
-        pair: tuple[int, int] | None,
-    ) -> Path:
-        log_dir = self._clue_dataset_root / "logs"
-        log_dir.mkdir(parents=True, exist_ok=True)
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        source_stem = Path(self.state.last_input_path or "unknown_source").stem
-        out_path = log_dir / f"{ts}_{source_stem}_{region.name}.log"
-
-        debug_lines = list(getattr(self.clue_parser, "last_clue_debug", []))
-        header = [
-            f"timestamp={datetime.now().isoformat(timespec='seconds')}",
-            f"source={self.state.last_input_path}",
-            f"region={region.name}",
-            f"box=({region.x},{region.y},{region.w},{region.h})",
-            f"parsed={pair}",
-            "--- trace ---",
-        ]
-        out_path.write_text("\n".join(header + debug_lines) + "\n", encoding="utf-8")
-        return out_path
-
-    def _save_failed_clue_crop(self, region: Region) -> Path | None:
-        if self.state.last_input_path is None:
-            return None
-
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        source_stem = Path(self.state.last_input_path).stem
-        filename = f"{ts}_{source_stem}_{region.name}.png"
-        output_path = self._clue_dataset_root / "unknown" / filename
-
-        ok = self.clue_parser.save_clue_crop(
-            self.state.last_input_path,
-            (region.x, region.y, region.w, region.h),
-            output_path,
-        )
-        if not ok:
-            return None
-        return output_path
-
-    def _offer_manual_label(self, unknown_crop_path: Path, region: Region) -> None:
-        answer = QMessageBox.question(
-            self,
-            "Label Failed Clue",
-            "Save a manual label for this failed clue crop?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if answer != QMessageBox.StandardButton.Yes:
-            return
-
-        label_text, ok = QInputDialog.getText(
-            self,
-            "Manual Clue Label",
-            "Enter label as voltorbs,total (e.g. 2,10):",
-        )
-        if not ok:
-            return
-
-        raw = label_text.strip()
-        match = re.fullmatch(r"\s*(\d+)\s*,\s*(\d+)\s*", raw)
-        if not match:
-            QMessageBox.warning(self, "Manual Clue Label", "Invalid format. Expected: voltorbs,total")
-            return
-
-        voltorbs = int(match.group(1))
-        total = int(match.group(2))
-        if not (0 <= voltorbs <= 5 and 0 <= total <= 15):
-            QMessageBox.warning(self, "Manual Clue Label", "Values out of range.")
-            return
-
-        stem = unknown_crop_path.stem
-        labeled_name = f"{stem}_v{voltorbs}_t{total}.png"
-        labeled_path = self._clue_dataset_root / "labeled" / labeled_name
-        labeled_path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(unknown_crop_path, labeled_path)
-
-        if self.state.last_input_path is not None:
-            self._append_clue_manifest(
-                split="labeled",
-                crop_path=labeled_path,
-                region_name=region.name,
-                source_path=self.state.last_input_path,
-                clue_box=(region.x, region.y, region.w, region.h),
-                parsed_value="",
-                manual_value=f"{voltorbs},{total}",
-            )
-
-        self._set_status(
-            f"Saved labeled clue crop: {labeled_path}",
-            level="success",
-        )
-
-    def _append_clue_manifest(
-        self,
-        *,
-        split: str,
-        crop_path: Path,
-        region_name: str,
-        source_path: str,
-        clue_box: tuple[int, int, int, int],
-        parsed_value: str,
-        manual_value: str,
-    ) -> None:
-        manifest_path = self._clue_dataset_root / "manifest.csv"
-        manifest_path.parent.mkdir(parents=True, exist_ok=True)
-        is_new = not manifest_path.exists()
-        x, y, w, h = clue_box
-        with manifest_path.open("a", newline="", encoding="utf-8") as fh:
-            writer = csv.writer(fh)
-            if is_new:
-                writer.writerow(
-                    [
-                        "timestamp",
-                        "split",
-                        "crop_path",
-                        "source_path",
-                        "region",
-                        "x",
-                        "y",
-                        "w",
-                        "h",
-                        "parsed_value",
-                        "manual_value",
-                    ]
-                )
-            writer.writerow(
-                [
-                    datetime.now().isoformat(timespec="seconds"),
-                    split,
-                    str(crop_path),
-                    source_path,
-                    region_name,
-                    x,
-                    y,
-                    w,
-                    h,
-                    parsed_value,
-                    manual_value,
-                ]
-            )
-
     def relabel_regions(self) -> None:
-        if self.state.last_input_path is None:
-            self._show_error("Capture or load a screenshot first.")
-            return
-
+        output_path = str(
+            Path(gettempdir()) / f"voltorb_overlay_capture_monitor_{self.state.selected_screen_index + 1}.png"
+        )
         capture_signature = self._build_capture_signature()
+
+        was_overlay_visible = self.overlay_btn.isChecked()
+        if was_overlay_visible:
+            self.x11_overlay.hide()
+
+        if self.state.target_window_id is not None:
+            pixmap = self._capture_window(self.state.target_window_id)
+        else:
+            screen = self._get_selected_screen()
+            if screen is None:
+                if was_overlay_visible:
+                    self.x11_overlay.show()
+                self._show_error("No monitor selected for screen capture.")
+                return
+            pixmap = screen.grabWindow(0)
+
+        if pixmap is None or pixmap.isNull() or not pixmap.save(output_path):
+            if was_overlay_visible:
+                self.x11_overlay.show()
+            target_desc = (
+                f"window #{self.state.target_window_id}"
+                if self.state.target_window_id is not None
+                else "selected monitor"
+            )
+            self._show_error(f"Failed to capture {target_desc}.")
+            return
+
+        if was_overlay_visible:
+            self.x11_overlay.show()
+
         self._parse_and_apply(
-            self.state.last_input_path,
-            capture_signature=capture_signature,
-            relabel_reason="manual relabel requested",
+            output_path, capture_signature=capture_signature, relabel_reason="label/relabel game"
         )
-
-    def save_labeled(self) -> None:
-        if self.state.last_input_path is None:
-            self._show_error("Capture or load a screenshot first.")
-            return
-
-        target, _ = QFileDialog.getSaveFileName(
-            self,
-            "Save Labeled Screenshot",
-            str(Path(self.state.last_input_path).with_name("labeled_screenshot.png")),
-            "PNG (*.png)",
-        )
-        if not target:
-            return
-
-        try:
-            self.parser.annotate(self.state.last_input_path, target)
-        except Exception as exc:
-            self._show_error(f"Failed to save labeled screenshot: {exc}")
-            return
-
-        self._set_status(f"Saved labeled screenshot: {target}", level="success")
 
     def clear_overlay(self) -> None:
         self.x11_overlay.clear_overlay()
@@ -1313,12 +823,12 @@ class OverlayControlWindow(QMainWindow):
         *,
         capture_signature: tuple[str, int | None, int, int, int, int] | None,
         relabel_reason: str,
-    ) -> None:
+    ) -> bool:
         try:
             result = self.parser.parse(image_path)
         except Exception as exc:
             self._show_error(f"Failed to parse screenshot: {exc}")
-            return
+            return False
 
         self.state.last_input_path = image_path
         self._last_image_size = (result.image_width, result.image_height)
@@ -1340,6 +850,7 @@ class OverlayControlWindow(QMainWindow):
             f"Parsed {len(result.regions)} base regions (+ clue subregions) from {Path(image_path).name} ({relabel_reason}).{method_text}{monitor_text}{warning_text}",
             level=level,
         )
+        return True
 
     def _expand_with_clue_subregions(self, regions: list[Region]) -> list[Region]:
         total_bounds = getattr(self.clue_parser, "_TOTAL_OCR_BOUNDS", (0.05, 0.02, 0.95, 0.42))
@@ -1400,20 +911,40 @@ class OverlayControlWindow(QMainWindow):
 
     def parse_all_clues(self) -> None:
         if self.state.last_input_path is None:
-            self._show_error("Capture or load a screenshot first.")
+            self._show_error("Label the game first.")
             return
+
         clue_regions = [r for r in self._last_parse_regions if self._is_clue_region(r.name)]
         if not clue_regions:
-            self._show_error("No clue regions available. Capture/relabel the screenshot first.")
+            self._show_error("No clue regions found. Label the game first.")
             return
+
+        debug = self.debug_checkbox.isChecked()
+        debug_run_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f") if debug else None
         parsed_count = 0
         failed: list[str] = []
         for region in clue_regions:
-            pair = self.clue_parser.parse_clue_from_screenshot(
-                self.state.last_input_path,
-                (region.x, region.y, region.w, region.h),
-                fast=not region.name.startswith("c"),
-            )
+            if debug:
+                artifacts = self.clue_parser.debug_parse_clue_from_screenshot(
+                    self.state.last_input_path,
+                    (region.x, region.y, region.w, region.h),
+                    output_root=self._clue_dataset_root / "debug_parse",
+                    region_name=region.name,
+                    run_id=debug_run_id,
+                )
+                pair = (
+                    (artifacts.voltorbs_value, artifacts.total_value)
+                    if artifacts is not None
+                    and artifacts.voltorbs_value is not None
+                    and artifacts.total_value is not None
+                    else None
+                )
+            else:
+                pair = self.clue_parser.parse_clue_from_screenshot(
+                    self.state.last_input_path,
+                    (region.x, region.y, region.w, region.h),
+                    fast=not region.name.startswith("c"),
+                )
             if pair is not None:
                 self._clue_parsed_values[region.name] = pair
                 parsed_count += 1
