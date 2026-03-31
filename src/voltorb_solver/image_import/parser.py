@@ -156,6 +156,8 @@ class ImageParser:
         raw_total_path = run_dir / "raw_total.png"
         preprocessed_voltorbs_path = run_dir / "preprocessed_voltorbs_bw.png"
         preprocessed_total_path = run_dir / "preprocessed_total_bw.png"
+        preprocessed_voltorbs_inv_path = run_dir / "preprocessed_voltorbs_bw_inv.png"
+        preprocessed_total_inv_path = run_dir / "preprocessed_total_bw_inv.png"
         upscaled_voltorbs_path = run_dir / "upscaled_voltorbs_bw.png"
         upscaled_total_path = run_dir / "upscaled_total_bw.png"
         log_path = run_dir / "debug.log"
@@ -167,18 +169,47 @@ class ImageParser:
         total_pre = self._preprocess_clue_debug_roi(total_roi)
         cv2.imwrite(str(preprocessed_voltorbs_path), voltorbs_pre)
         cv2.imwrite(str(preprocessed_total_path), total_pre)
+        voltorbs_pre_inv = 255 - voltorbs_pre
+        total_pre_inv = 255 - total_pre
+        cv2.imwrite(str(preprocessed_voltorbs_inv_path), voltorbs_pre_inv)
+        cv2.imwrite(str(preprocessed_total_inv_path), total_pre_inv)
 
         voltorbs_upscaled = cv2.resize(voltorbs_pre, None, fx=6.0, fy=6.0, interpolation=cv2.INTER_NEAREST)
         total_upscaled = cv2.resize(total_pre, None, fx=6.0, fy=6.0, interpolation=cv2.INTER_NEAREST)
         cv2.imwrite(str(upscaled_voltorbs_path), voltorbs_upscaled)
         cv2.imwrite(str(upscaled_total_path), total_upscaled)
 
-        ocr_config = "--psm 6"
-        voltorbs_text = pytesseract.image_to_string(voltorbs_upscaled, config=ocr_config).strip()
-        total_text = pytesseract.image_to_string(total_upscaled, config=ocr_config).strip()
+        voltorbs_inputs = self._build_debug_ocr_inputs(
+            run_dir=run_dir,
+            field_name="voltorbs",
+            normal=voltorbs_pre,
+            inverted=voltorbs_pre_inv,
+        )
+        total_inputs = self._build_debug_ocr_inputs(
+            run_dir=run_dir,
+            field_name="total",
+            normal=total_pre,
+            inverted=total_pre_inv,
+        )
 
-        voltorbs_value = self._extract_first_int(voltorbs_text)
-        total_value = self._extract_first_int(total_text)
+        ocr_configs = [
+            "--oem 3 --psm 10 -c tessedit_char_whitelist=0123456789",
+            "--oem 3 --psm 8 -c tessedit_char_whitelist=0123456789",
+            "--oem 3 --psm 7 -c tessedit_char_whitelist=0123456789",
+            "--psm 6",
+        ]
+        voltorbs_text, voltorbs_value, voltorbs_attempts = self._run_debug_ocr_configs(
+            voltorbs_inputs,
+            ocr_configs,
+            min_value=0,
+            max_value=5,
+        )
+        total_text, total_value, total_attempts = self._run_debug_ocr_configs(
+            total_inputs,
+            ocr_configs,
+            min_value=0,
+            max_value=15,
+        )
 
         x, y, w, h = clue_box
         log_lines = [
@@ -187,12 +218,20 @@ class ImageParser:
             f"clue_box=({x},{y},{w},{h})",
             f"upscaled_voltorbs={upscaled_voltorbs_path}",
             f"upscaled_total={upscaled_total_path}",
-            f"tesseract_config={ocr_config}",
+            f"tesseract_configs={ocr_configs}",
             f"voltorbs_text={voltorbs_text!r}",
             f"total_text={total_text!r}",
             f"voltorbs_value={voltorbs_value}",
             f"total_value={total_value}",
         ]
+        for idx, (input_label, config, text, value) in enumerate(voltorbs_attempts):
+            log_lines.append(
+                f"voltorbs_attempt[{idx}] input={input_label!r} config={config!r} text={text!r} value={value}"
+            )
+        for idx, (input_label, config, text, value) in enumerate(total_attempts):
+            log_lines.append(
+                f"total_attempt[{idx}] input={input_label!r} config={config!r} text={text!r} value={value}"
+            )
         log_path.write_text("\n".join(log_lines) + "\n", encoding="utf-8")
 
         return ClueDebugArtifacts(
@@ -284,6 +323,58 @@ class ImageParser:
         if match is None:
             return None
         return int(match.group(0))
+
+    def _build_debug_ocr_inputs(
+        self,
+        *,
+        run_dir: Path,
+        field_name: str,
+        normal: np.ndarray,
+        inverted: np.ndarray,
+    ) -> list[tuple[str, np.ndarray]]:
+        inputs: list[tuple[str, np.ndarray]] = []
+        for polarity, image in (("normal", normal), ("inverted", inverted)):
+            for scale in (4, 6, 8):
+                upscaled = cv2.resize(image, None, fx=float(scale), fy=float(scale), interpolation=cv2.INTER_NEAREST)
+                bordered = np.pad(upscaled, ((10, 10), (10, 10)), mode="constant", constant_values=255)
+                label = f"{field_name}_{polarity}_{scale}x_border"
+                out_path = run_dir / f"ocr_input_{label}.png"
+                cv2.imwrite(str(out_path), bordered)
+                inputs.append((label, bordered))
+        return inputs
+
+    def _run_debug_ocr_configs(
+        self,
+        inputs: list[tuple[str, np.ndarray]],
+        configs: list[str],
+        *,
+        min_value: int,
+        max_value: int,
+    ) -> tuple[str, int | None, list[tuple[str, str, str, int | None]]]:
+        attempts: list[tuple[str, str, str, int | None]] = []
+        chosen_text = ""
+        chosen_value: int | None = None
+
+        for input_label, image in inputs:
+            for config in configs:
+                try:
+                    text = pytesseract.image_to_string(image, config=config).strip()
+                except Exception:
+                    text = ""
+                value = self._extract_first_int(text)
+                attempts.append((input_label, config, text, value))
+
+                if chosen_value is None and value is not None and min_value <= value <= max_value:
+                    chosen_text = text
+                    chosen_value = value
+
+        if chosen_value is None:
+            for _input, _config, text, _value in attempts:
+                if text:
+                    chosen_text = text
+                    break
+
+        return chosen_text, chosen_value, attempts
 
     def _ocr_number_field(
         self,

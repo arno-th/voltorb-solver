@@ -14,10 +14,14 @@ from PySide6.QtGui import QColor, QGuiApplication
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QFrame,
     QFileDialog,
     QHBoxLayout,
     QLabel,
+    QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QMessageBox,
     QInputDialog,
@@ -755,40 +759,103 @@ class OverlayControlWindow(QMainWindow):
             self._show_error("Capture or load a screenshot first.")
             return
 
-        selected_region = self._pick_clue_region()
-        if selected_region is None:
+        selected_regions = self._pick_clue_regions()
+        if selected_regions is None:
             return
 
-        artifacts = self.clue_parser.debug_parse_clue_from_screenshot(
-            self.state.last_input_path,
-            (selected_region.x, selected_region.y, selected_region.w, selected_region.h),
-            output_root=self._clue_dataset_root / "debug_parse",
-            region_name=selected_region.name,
-        )
-        if artifacts is None:
-            QMessageBox.warning(
-                self,
-                "Parse Clue Debug",
-                "Debug parse failed. Verify OCR dependencies and clue region geometry.",
+        if not selected_regions:
+            return
+
+        successes: list[tuple[str, Path, int | None, int | None]] = []
+        failures: list[str] = []
+        for region in selected_regions:
+            artifacts = self.clue_parser.debug_parse_clue_from_screenshot(
+                self.state.last_input_path,
+                (region.x, region.y, region.w, region.h),
+                output_root=self._clue_dataset_root / "debug_parse",
+                region_name=region.name,
             )
-            return
+            if artifacts is None:
+                failures.append(region.name)
+                continue
+            successes.append((region.name, artifacts.log_path, artifacts.voltorbs_value, artifacts.total_value))
 
-        self._set_status(
-            f"Saved clue debug artifacts for {selected_region.name}. Log: {artifacts.log_path}",
-            level="success",
-        )
+        if successes:
+            self._set_status(
+                f"Saved clue debug artifacts for {len(successes)}/{len(selected_regions)} selected clues.",
+                level="success" if not failures else "warning",
+            )
+        elif failures:
+            self._set_status(
+                "Debug parse failed for all selected clues. Verify OCR dependencies and clue region geometry.",
+                level="error",
+            )
+
+        summary_lines = [
+            f"Selected clues: {len(selected_regions)}",
+            f"Succeeded: {len(successes)}",
+            f"Failed: {len(failures)}",
+            "",
+        ]
+        for name, log_path, voltorbs, total in successes[:12]:
+            summary_lines.append(f"{name}: voltorbs={voltorbs}, total={total}")
+            summary_lines.append(f"  log: {log_path}")
+        if len(successes) > 12:
+            summary_lines.append(f"... and {len(successes) - 12} more successful clues.")
+        if failures:
+            summary_lines.append("")
+            summary_lines.append(f"Failed clues: {', '.join(failures)}")
+
         QMessageBox.information(
             self,
             "Parse Clue Debug",
-            "Saved debug artifacts.\n"
-            f"Raw voltorbs: {artifacts.raw_voltorbs_path}\n"
-            f"Raw total: {artifacts.raw_total_path}\n"
-            f"Preprocessed voltorbs: {artifacts.preprocessed_voltorbs_path}\n"
-            f"Preprocessed total: {artifacts.preprocessed_total_path}\n"
-            f"OCR voltorbs text/value: {artifacts.voltorbs_text!r} / {artifacts.voltorbs_value}\n"
-            f"OCR total text/value: {artifacts.total_text!r} / {artifacts.total_value}\n"
-            f"Log: {artifacts.log_path}",
+            "\n".join(summary_lines),
         )
+
+    def _pick_clue_regions(self) -> list[Region] | None:
+        clue_regions = [
+            region
+            for region in self._cached_regions
+            if (region.name.startswith("r") or region.name.startswith("c")) and region.name[1:].isdigit()
+        ]
+        if not clue_regions:
+            self._show_error("No clue regions available. Capture/relabel the screenshot first.")
+            return None
+
+        clue_regions = sorted(clue_regions, key=lambda region: (region.name[0], int(region.name[1:])))
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Choose Clue Boxes")
+        dialog.setMinimumWidth(300)
+        layout = QVBoxLayout(dialog)
+
+        hint = QLabel("Tick clue regions to run debug parse:")
+        layout.addWidget(hint)
+
+        list_widget = QListWidget()
+        for region in clue_regions:
+            item = QListWidgetItem(region.name)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Unchecked)
+            list_widget.addItem(item)
+        layout.addWidget(list_widget)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return None
+
+        selected: list[Region] = []
+        for idx in range(list_widget.count()):
+            item = list_widget.item(idx)
+            if item.checkState() == Qt.CheckState.Checked:
+                selected.append(clue_regions[idx])
+        if not selected:
+            QMessageBox.information(self, "Parse Clue Debug", "No clue regions selected.")
+        return selected
 
     def _pick_clue_region(self) -> Region | None:
         clue_regions = [

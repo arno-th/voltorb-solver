@@ -229,7 +229,7 @@ def test_debug_parse_clue_from_screenshot_writes_artifacts_and_log(monkeypatch, 
     )
 
     assert artifacts is not None
-    assert len(written) == 6
+    assert len(written) >= 20
     assert artifacts.voltorbs_value == 2
     assert artifacts.total_value == 10
     assert artifacts.log_path.exists()
@@ -246,6 +246,9 @@ def test_debug_parse_clue_from_screenshot_writes_artifacts_and_log(monkeypatch, 
     assert "region=r2" in log_text
     assert "upscaled_voltorbs=" in log_text
     assert "upscaled_total=" in log_text
+    assert "ocr_input_voltorbs_normal_4x_border" in log_text
     assert "voltorbs_text='2'" in log_text
     assert "total_text='10'" in log_text
-    assert "tesseract_config=--psm 6" in log_text
+    assert "tesseract_configs=['--oem 3 --psm 10 -c tessedit_char_whitelist=0123456789'" in log_text
+    assert "voltorbs_attempt[0] input=" in log_text
+    assert "total_attempt[0] input=" in log_text
