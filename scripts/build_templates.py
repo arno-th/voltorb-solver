@@ -94,7 +94,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--suffix",
-        default="_tpl",
+        default="",
         help="Suffix added to each processed filename before .png.",
     )
 

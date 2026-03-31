@@ -22,32 +22,17 @@ def test_image_parser_graceful_fallback(tmp_path: Path) -> None:
     assert isinstance(result.warnings, list)
 
 
-def test_tesseract_unavailable_warning_is_actionable(monkeypatch, tmp_path: Path) -> None:
+def test_parse_image_warns_when_cv2_unavailable(monkeypatch, tmp_path: Path) -> None:
     image_path = tmp_path / "sample.png"
     Image.new("RGB", (100, 100), color="white").save(image_path)
 
     parser = ImageParser()
 
-    fake_cv2 = types.SimpleNamespace()
-    fake_cv2.COLOR_RGB2BGR = 1
-    fake_cv2.COLOR_BGR2GRAY = 2
-    fake_cv2.THRESH_BINARY = 4
-    fake_cv2.THRESH_OTSU = 8
-    fake_cv2.cvtColor = lambda img, _code: img
-    fake_cv2.GaussianBlur = lambda img, _ksize, _sigma: img
-    fake_cv2.threshold = lambda img, _t, _m, _f: (0, img)
-
-    fake_pytesseract = types.SimpleNamespace(
-        pytesseract=types.SimpleNamespace(tesseract_cmd="tesseract"),
-        get_tesseract_version=lambda: (_ for _ in ()).throw(RuntimeError("missing")),
-    )
-
-    monkeypatch.setattr(parser_module, "cv2", fake_cv2)
-    monkeypatch.setattr(parser_module, "pytesseract", fake_pytesseract)
+    monkeypatch.setattr(parser_module, "cv2", None)
 
     result = parser.parse_image(str(image_path), (0, 0, 100, 100))
 
-    assert any("set `TESSERACT_CMD`" in warning for warning in result.warnings)
+    assert any("opencv-python" in warning for warning in result.warnings)
 
 
 def test_parse_known_voltorb_screenshot_when_ocr_available() -> None:
@@ -81,16 +66,13 @@ def test_parse_clue_box_returns_pair_with_stubbed_parser(monkeypatch, tmp_path: 
     fake_cv2.COLOR_RGB2BGR = 1
     fake_cv2.cvtColor = lambda img, _code: img
 
-    fake_pytesseract = types.SimpleNamespace()
-
     monkeypatch.setattr(parser_module, "cv2", fake_cv2)
-    monkeypatch.setattr(parser_module, "pytesseract", fake_pytesseract)
-    monkeypatch.setattr(parser, "_configure_tesseract_runtime", lambda: True)
-    monkeypatch.setattr(parser, "_ocr_number_field", lambda *_args, **_kwargs: 2 if _kwargs["field_name"] == "voltorbs" else 10)
+    monkeypatch.setattr(parser, "_ocr_number_field", lambda *_args, **_kwargs: 2 if _kwargs["field_name"] == "voltorbs" else 8)
+    monkeypatch.setattr(parser, "_ocr_number_pixel_token", lambda *_args, **_kwargs: None)
 
     result = parser.parse_clue_box(str(image_path))
 
-    assert result == (2, 10)
+    assert result == (2, 8)
 
 
 def test_parse_clue_box_returns_none_when_unreadable(monkeypatch) -> None:
@@ -99,12 +81,9 @@ def test_parse_clue_box_returns_none_when_unreadable(monkeypatch) -> None:
     fake_cv2 = types.SimpleNamespace()
     fake_cv2.COLOR_BGR2GRAY = 2
     fake_cv2.cvtColor = lambda img, _code: img
-    fake_pytesseract = types.SimpleNamespace()
-
     monkeypatch.setattr(parser_module, "cv2", fake_cv2)
-    monkeypatch.setattr(parser_module, "pytesseract", fake_pytesseract)
-    monkeypatch.setattr(parser, "_configure_tesseract_runtime", lambda: True)
     monkeypatch.setattr(parser, "_ocr_number_field", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(parser, "_ocr_number_pixel_token", lambda *_args, **_kwargs: None)
 
     arr = np.zeros((32, 32, 3), dtype=np.uint8)
     result = parser.parse_clue_box(arr)
@@ -123,7 +102,7 @@ def test_parse_clue_from_screenshot_crops_and_parses(monkeypatch, tmp_path: Path
 
     captured_shapes: list[tuple[int, int]] = []
 
-    def fake_parse_clue_box(crop):
+    def fake_parse_clue_box(crop, *, fast=True):
         captured_shapes.append((crop.shape[1], crop.shape[0]))
         return (1, 7)
 
@@ -189,8 +168,8 @@ def test_split_clue_fields_returns_stable_regions() -> None:
 
     assert split is not None
     voltorbs_roi, total_roi = split
-    assert voltorbs_roi.shape[:2] == (48, 48)
-    assert total_roi.shape[:2] == (40, 102)
+    assert voltorbs_roi.shape[:2] == (48, 45)
+    assert total_roi.shape[:2] == (40, 83)
 
 
 def test_debug_parse_clue_from_screenshot_writes_artifacts_and_log(monkeypatch, tmp_path: Path) -> None:
@@ -200,8 +179,9 @@ def test_debug_parse_clue_from_screenshot_writes_artifacts_and_log(monkeypatch, 
 
     fake_cv2 = types.SimpleNamespace()
     fake_cv2.COLOR_BGR2GRAY = 1
-    fake_cv2.THRESH_BINARY_INV = 2
-    fake_cv2.THRESH_OTSU = 4
+    fake_cv2.THRESH_BINARY = 2
+    fake_cv2.THRESH_BINARY_INV = 4
+    fake_cv2.THRESH_OTSU = 8
     fake_cv2.INTER_NEAREST = 5
     fake_cv2.imread = lambda _path: np.zeros((80, 100, 3), dtype=np.uint8)
     fake_cv2.cvtColor = lambda img, _code: img[:, :, 0]
@@ -209,17 +189,8 @@ def test_debug_parse_clue_from_screenshot_writes_artifacts_and_log(monkeypatch, 
     fake_cv2.resize = lambda img, _size, fx, fy, interpolation: img
     fake_cv2.imwrite = lambda path, _img: written.append(path) or True
 
-    ocr_calls: list[str] = []
-
-    def fake_image_to_string(_img, *, config: str = "") -> str:
-        ocr_calls.append(config)
-        return "2" if len(ocr_calls) == 1 else "10"
-
-    fake_pytesseract = types.SimpleNamespace(image_to_string=fake_image_to_string)
-
     monkeypatch.setattr(parser_module, "cv2", fake_cv2)
-    monkeypatch.setattr(parser_module, "pytesseract", fake_pytesseract)
-    monkeypatch.setattr(parser, "_configure_tesseract_runtime", lambda: True)
+    monkeypatch.setattr(parser, "_run_debug_ocr_configs", lambda *_args, **_kwargs: ("template:2", 2, []))
 
     artifacts = parser.debug_parse_clue_from_screenshot(
         "dummy.png",
@@ -232,7 +203,7 @@ def test_debug_parse_clue_from_screenshot_writes_artifacts_and_log(monkeypatch, 
     assert artifacts is not None
     assert len(written) >= 20
     assert artifacts.voltorbs_value == 2
-    assert artifacts.total_value == 10
+    assert artifacts.total_value == 2
     assert artifacts.log_path.exists()
     assert artifacts.log_path.parent.name == "r2"
     assert artifacts.log_path.parent.parent.name == "batch_001"
@@ -249,9 +220,24 @@ def test_debug_parse_clue_from_screenshot_writes_artifacts_and_log(monkeypatch, 
     assert "region=r2" in log_text
     assert "upscaled_voltorbs=" in log_text
     assert "upscaled_total=" in log_text
-    assert "ocr_input_voltorbs_normal_4x_border" in log_text
-    assert "voltorbs_text='2'" in log_text
-    assert "total_text='10'" in log_text
-    assert "tesseract_configs=['--oem 3 --psm 10 -c tessedit_char_whitelist=0123456789'" in log_text
-    assert "voltorbs_attempt[0] input=" in log_text
-    assert "total_attempt[0] input=" in log_text
+    assert "voltorbs_text='template:2'" in log_text
+    assert "total_text='template:2'" in log_text
+    assert "tesseract_configs=['template']" in log_text
+
+
+def test_save_unmatched_template_sample_writes_manifest(tmp_path: Path, monkeypatch) -> None:
+    parser = ImageParser()
+
+    monkeypatch.setattr(parser, "_project_root", lambda: tmp_path)
+    roi = np.zeros((12, 12, 3), dtype=np.uint8)
+    roi[3:9, 5:7] = 255
+
+    parser._save_unmatched_template_sample(roi, kind="top", source_tag="unit")
+
+    out_dir = tmp_path / "assets/templates/raw/clue_unknown"
+    assert out_dir.exists()
+    manifest = out_dir / "manifest.csv"
+    assert manifest.exists()
+    rows = manifest.read_text(encoding="utf-8")
+    assert "kind,path,source" in rows
+    assert ",top," in rows

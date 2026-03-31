@@ -866,6 +866,12 @@ class OverlayControlWindow(QMainWindow):
         hint = QLabel("Tick clue regions to run debug parse:")
         layout.addWidget(hint)
 
+        controls = QHBoxLayout()
+        controls.addStretch(1)
+        select_all_btn = QPushButton("Select all")
+        controls.addWidget(select_all_btn)
+        layout.addLayout(controls)
+
         list_widget = QListWidget()
         for region in clue_regions:
             item = QListWidgetItem(region.name)
@@ -873,6 +879,27 @@ class OverlayControlWindow(QMainWindow):
             item.setCheckState(Qt.CheckState.Unchecked)
             list_widget.addItem(item)
         layout.addWidget(list_widget)
+
+        def _refresh_select_all_label() -> None:
+            all_checked = list_widget.count() > 0 and all(
+                list_widget.item(i).checkState() == Qt.CheckState.Checked
+                for i in range(list_widget.count())
+            )
+            select_all_btn.setText("Clear all" if all_checked else "Select all")
+
+        def _toggle_select_all() -> None:
+            all_checked = list_widget.count() > 0 and all(
+                list_widget.item(i).checkState() == Qt.CheckState.Checked
+                for i in range(list_widget.count())
+            )
+            target_state = Qt.CheckState.Unchecked if all_checked else Qt.CheckState.Checked
+            for i in range(list_widget.count()):
+                list_widget.item(i).setCheckState(target_state)
+            _refresh_select_all_label()
+
+        select_all_btn.clicked.connect(_toggle_select_all)
+        list_widget.itemChanged.connect(lambda _item: _refresh_select_all_label())
+        _refresh_select_all_label()
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(dialog.accept)

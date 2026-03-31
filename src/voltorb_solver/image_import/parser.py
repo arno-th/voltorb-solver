@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import csv
+import hashlib
 import os
 from pathlib import Path
 import re
@@ -53,8 +55,192 @@ class ImageParser:
     _VOLTORB_TOKEN_BOUNDS = (0.615, 0.50, 0.99, 0.98)
     _VOLTORB_OCR_BOUNDS = (0.615, 0.50, 0.99, 0.98)
 
+    _TEMPLATE_MIN_SCORE = 0.66
+
+    def __init__(self) -> None:
+        self._templates_loaded = False
+        self._template_bank: dict[str, dict[int, list[np.ndarray]]] = {"top": {}, "bottom": {}}
+        self._unmatched_saved_hashes: set[str] = set()
+        self.last_clue_debug: list[str] = []
+
+    def _project_root(self) -> Path:
+        return Path(__file__).resolve().parents[3]
+
+    def _resolve_project_path(self, path: str | Path) -> Path:
+        p = Path(path)
+        if p.is_absolute():
+            return p
+        return self._project_root() / p
+
+    def _parse_manual_value(self, value: str) -> tuple[int, int] | None:
+        token = value.strip()
+        if not token:
+            return None
+        parts = [part.strip() for part in token.split(",")]
+        if len(parts) != 2:
+            return None
+        try:
+            voltorbs = int(parts[0])
+            total = int(parts[1])
+        except ValueError:
+            return None
+        return voltorbs, total
+
+    def _prepare_template_image(self, roi: np.ndarray) -> np.ndarray | None:
+        if cv2 is None or roi.size == 0:
+            return None
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY) if roi.ndim == 3 else roi
+        bw = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
+
+        # Normalize polarity so foreground digits are white on black for stable matching.
+        if int(np.count_nonzero(bw)) > (bw.size // 2):
+            bw = 255 - bw
+
+        ys, xs = np.where(bw > 0)
+        if len(xs) == 0 or len(ys) == 0:
+            return None
+        x0, x1 = int(xs.min()), int(xs.max()) + 1
+        y0, y1 = int(ys.min()), int(ys.max()) + 1
+        glyph = bw[y0:y1, x0:x1]
+
+        side = max(glyph.shape[0], glyph.shape[1])
+        canvas = np.zeros((side, side), dtype=np.uint8)
+        y_off = (side - glyph.shape[0]) // 2
+        x_off = (side - glyph.shape[1]) // 2
+        canvas[y_off : y_off + glyph.shape[0], x_off : x_off + glyph.shape[1]] = glyph
+        return cv2.resize(canvas, (32, 32), interpolation=cv2.INTER_NEAREST)
+
+    def _load_clue_templates(self) -> None:
+        if self._templates_loaded or cv2 is None:
+            return
+
+        project_root = self._project_root()
+
+        manifest_path = project_root / "assets/parser_debug/clue_dataset/manifest.csv"
+        if manifest_path.exists():
+            try:
+                with manifest_path.open("r", encoding="utf-8", newline="") as fh:
+                    reader = csv.DictReader(fh)
+                    for row in reader:
+                        if (row.get("split", "").strip().lower() != "labeled"):
+                            continue
+                        label = self._parse_manual_value(row.get("manual_value", ""))
+                        rel_crop = row.get("crop_path", "").strip()
+                        if label is None or not rel_crop:
+                            continue
+                        crop_path = self._resolve_project_path(rel_crop)
+                        crop = cv2.imread(str(crop_path))
+                        if crop is None:
+                            continue
+                        split = self.split_clue_fields(crop)
+                        if split is None:
+                            continue
+                        voltorbs_roi, total_roi = split
+                        voltorbs_norm = self._prepare_template_image(voltorbs_roi)
+                        total_norm = self._prepare_template_image(total_roi)
+                        if voltorbs_norm is not None:
+                            self._template_bank["bottom"].setdefault(label[0], []).append(voltorbs_norm)
+                        if total_norm is not None:
+                            self._template_bank["top"].setdefault(label[1], []).append(total_norm)
+            except Exception:
+                pass
+
+        # Also load manually curated templates from assets/templates and assets/templates/raw.
+        for root_rel in ("assets/templates", "assets/templates/raw"):
+            root = project_root / root_rel
+            if not root.exists():
+                continue
+            for image_path in root.rglob("*.png"):
+                stem = image_path.stem.lower()
+                top_match = re.search(r"clue_t_(\d+)$", stem)
+                bottom_match = re.search(r"clue_v_(\d+)$", stem)
+                if top_match is None and bottom_match is None:
+                    continue
+                image = cv2.imread(str(image_path))
+                if image is None:
+                    continue
+                normalized = self._prepare_template_image(image)
+                if normalized is None:
+                    continue
+                if top_match is not None:
+                    value = int(top_match.group(1))
+                    self._template_bank["top"].setdefault(value, []).append(normalized)
+                if bottom_match is not None:
+                    value = int(bottom_match.group(1))
+                    self._template_bank["bottom"].setdefault(value, []).append(normalized)
+
+        self._templates_loaded = True
+
+    def _match_number_template(
+        self,
+        roi: np.ndarray,
+        *,
+        kind: str,
+        min_value: int,
+        max_value: int,
+        save_if_unmatched: bool,
+        source_tag: str,
+    ) -> tuple[int | None, float]:
+        if cv2 is None or roi.size == 0:
+            return None, -1.0
+
+        self._load_clue_templates()
+        normalized = self._prepare_template_image(roi)
+        if normalized is None:
+            if save_if_unmatched:
+                self._save_unmatched_template_sample(roi, kind=kind, source_tag=source_tag)
+            return None, -1.0
+
+        best_value: int | None = None
+        best_score = -1.0
+        for value, templates in self._template_bank.get(kind, {}).items():
+            if not (min_value <= value <= max_value):
+                continue
+            for template in templates:
+                if template.shape != normalized.shape:
+                    resized = cv2.resize(normalized, (template.shape[1], template.shape[0]), interpolation=cv2.INTER_NEAREST)
+                else:
+                    resized = normalized
+                score = float(cv2.matchTemplate(resized, template, cv2.TM_CCOEFF_NORMED)[0, 0])
+                if score > best_score:
+                    best_score = score
+                    best_value = value
+
+        if best_value is not None and best_score >= self._TEMPLATE_MIN_SCORE:
+            return best_value, best_score
+
+        if save_if_unmatched:
+            self._save_unmatched_template_sample(roi, kind=kind, source_tag=source_tag)
+        return None, best_score
+
+    def _save_unmatched_template_sample(self, roi: np.ndarray, *, kind: str, source_tag: str) -> None:
+        if cv2 is None or roi.size == 0:
+            return
+
+        normalized = self._prepare_template_image(roi)
+        hash_source = normalized if normalized is not None else roi
+        digest = hashlib.sha1(hash_source.tobytes()).hexdigest()[:12]
+        key = f"{kind}:{digest}"
+        if key in self._unmatched_saved_hashes:
+            return
+        self._unmatched_saved_hashes.add(key)
+
+        out_dir = self._project_root() / "assets/templates/raw/clue_unknown"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        file_name = f"{stamp}_{kind}_{digest}.png"
+        out_path = out_dir / file_name
+        cv2.imwrite(str(out_path), roi)
+
+        manifest_path = out_dir / "manifest.csv"
+        if not manifest_path.exists():
+            manifest_path.write_text("timestamp,kind,path,source\n", encoding="utf-8")
+        with manifest_path.open("a", encoding="utf-8") as fh:
+            rel = out_path.relative_to(self._project_root())
+            fh.write(f"{stamp},{kind},{rel.as_posix()},{source_tag}\n")
+
     def _clue_ocr_backend_order(self) -> list[str]:
-        return ["tesseract"]
+        return ["template"]
 
     def extract_clue_crop(
         self,
@@ -132,9 +318,7 @@ class ImageParser:
         region_name: str = "clue",
         run_id: str | None = None,
     ) -> ClueDebugArtifacts | None:
-        if cv2 is None or pytesseract is None:
-            return None
-        if not self._configure_tesseract_runtime():
+        if cv2 is None:
             return None
 
         crop = self.extract_clue_crop(image_path, clue_box)
@@ -197,23 +381,20 @@ class ImageParser:
             inverted=total_pre_inv,
         )
 
-        ocr_configs = [
-            "--oem 3 --psm 10 -c tessedit_char_whitelist=0123456789",
-            "--oem 3 --psm 8 -c tessedit_char_whitelist=0123456789",
-            "--oem 3 --psm 7 -c tessedit_char_whitelist=0123456789",
-            "--psm 6",
-        ]
+        ocr_configs = ["template"]
         voltorbs_text, voltorbs_value, voltorbs_attempts = self._run_debug_ocr_configs(
             voltorbs_inputs,
             ocr_configs,
             min_value=0,
             max_value=5,
+            kind="bottom",
         )
         total_text, total_value, total_attempts = self._run_debug_ocr_configs(
             total_inputs,
             ocr_configs,
             min_value=0,
             max_value=15,
+            kind="top",
         )
 
         x, y, w, h = clue_box
@@ -290,6 +471,14 @@ class ImageParser:
             debug_lines=debug_lines,
         )
 
+        # Fallback tuned for pixel-font clue glyphs when confidence-based OCR misses a number.
+        if voltorbs is None:
+            voltorbs = self._ocr_number_pixel_token(voltorbs_roi, min_value=0, max_value=5, kind="bottom")
+            debug_lines.append(f"field=voltorbs pixel_token_fallback={voltorbs}")
+        if total is None:
+            total = self._ocr_number_pixel_token(total_roi, min_value=0, max_value=15, kind="top")
+            debug_lines.append(f"field=total pixel_token_fallback={total}")
+
         pair: tuple[int, int] | None = None
         if voltorbs is not None and total is not None:
             candidate = (voltorbs, total)
@@ -356,23 +545,30 @@ class ImageParser:
         *,
         min_value: int,
         max_value: int,
+        kind: str,
     ) -> tuple[str, int | None, list[tuple[str, str, str, int | None]]]:
         attempts: list[tuple[str, str, str, int | None]] = []
         chosen_text = ""
         chosen_value: int | None = None
+        chosen_score = -1.0
 
         for input_label, image in inputs:
             for config in configs:
-                try:
-                    text = pytesseract.image_to_string(image, config=config).strip()
-                except Exception:
-                    text = ""
-                value = self._extract_first_int(text)
+                value, score = self._match_number_template(
+                    image,
+                    kind=kind,
+                    min_value=min_value,
+                    max_value=max_value,
+                    save_if_unmatched=False,
+                    source_tag=f"debug:{input_label}",
+                )
+                text = f"template_score={score:.4f}"
                 attempts.append((input_label, config, text, value))
 
-                if chosen_value is None and value is not None and min_value <= value <= max_value:
-                    chosen_text = text
+                if value is not None and score > chosen_score:
+                    chosen_text = f"template:{value}@{score:.3f}"
                     chosen_value = value
+                    chosen_score = score
 
         if chosen_value is None:
             for _input, _config, text, _value in attempts:
@@ -397,122 +593,22 @@ class ImageParser:
                 debug_lines.append(f"field={field_name} unavailable")
             return None
 
-        backends = self._clue_ocr_backend_order()
-        if debug_lines is not None:
-            debug_lines.append(f"field={field_name} backends={backends}")
-
-        best_value: int | None = None
-        best_score = -1.0
-        for _backend in backends:
-            value, score = self._ocr_number_field_tesseract(
-                roi,
-                min_value=min_value,
-                max_value=max_value,
-                fast=fast,
-                field_name=field_name,
-                debug_lines=debug_lines,
-            )
-
-            if value is not None and score > best_score:
-                best_value = value
-                best_score = score
+        kind = "bottom" if field_name == "voltorbs" else "top"
+        value, score = self._match_number_template(
+            roi,
+            kind=kind,
+            min_value=min_value,
+            max_value=max_value,
+            save_if_unmatched=True,
+            source_tag=f"field:{field_name}",
+        )
 
         if debug_lines is not None:
-            if best_value is None:
-                debug_lines.append(f"field={field_name} result=None")
+            if value is None:
+                debug_lines.append(f"field={field_name} template_result=None score={score:.3f}")
             else:
-                debug_lines.append(f"field={field_name} winner={best_value} score={best_score:.2f}")
-        return best_value
-
-    def _ocr_number_field_tesseract(
-        self,
-        roi: np.ndarray,
-        *,
-        min_value: int,
-        max_value: int,
-        fast: bool,
-        field_name: str,
-        debug_lines: list[str] | None = None,
-    ) -> tuple[int | None, float]:
-        if pytesseract is None:
-            if debug_lines is not None:
-                debug_lines.append(f"field={field_name} backend=tesseract unavailable")
-            return None, -1.0
-
-        if not self._configure_tesseract_runtime():
-            if debug_lines is not None:
-                debug_lines.append(f"field={field_name} backend=tesseract runtime_unavailable")
-            return None, -1.0
-
-        grayscale_im = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-        nearest = cv2.resize(grayscale_im, None, fx=6.0, fy=6.0, interpolation=cv2.INTER_NEAREST)
-        variants = [
-            ("nearest", nearest),
-            ("otsu", cv2.threshold(nearest, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]),
-        ]
-        if not fast:
-            variants.append(
-                ("otsu_inv", cv2.threshold(nearest, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1])
-            )
-
-        psm_modes = (10, 8) if fast else (10, 8, 7)
-        config_base = "--oem 3 -c tessedit_char_whitelist=0123456789"
-        scores: dict[int, float] = {}
-
-        for variant_name, variant in variants:
-            for psm in psm_modes:
-                try:
-                    data = pytesseract.image_to_data(
-                        variant,
-                        output_type=pytesseract.Output.DICT,
-                        config=f"{config_base} --psm {psm}",
-                    )
-                except Exception:
-                    continue
-
-                texts = data.get("text", [])
-                confs = data.get("conf", [])
-                count = min(len(texts), len(confs))
-                for i in range(count):
-                    text = str(texts[i]).strip()
-                    if not text:
-                        continue
-
-                    try:
-                        confidence = float(confs[i])
-                    except Exception:
-                        confidence = -1.0
-
-                    digits = re.findall(r"\d+", text)
-                    if not digits:
-                        continue
-
-                    token = digits[0]
-                    value = int(token)
-                    weight = max(1.0, confidence if confidence > 0 else 1.0)
-                    if min_value <= value <= max_value:
-                        scores[value] = scores.get(value, 0.0) + weight
-
-                    if len(token) == 2 and token.startswith("1"):
-                        short_value = int(token[1])
-                        if min_value <= short_value <= max_value:
-                            scores[short_value] = scores.get(short_value, 0.0) + weight * 0.6
-
-                    if token == "10" and min_value == 0:
-                        scores[0] = scores.get(0, 0.0) + weight * 0.6
-
-                if debug_lines is not None:
-                    debug_lines.append(
-                        "field="
-                        f"{field_name} backend=tesseract variant={variant_name} psm={psm} "
-                        f"partial_scores={dict(sorted(scores.items()))}"
-                    )
-
-        if not scores:
-            return None, -1.0
-
-        value, score = max(scores.items(), key=lambda item: item[1])
-        return value, float(score)
+                debug_lines.append(f"field={field_name} template_winner={value} score={score:.3f}")
+        return value
 
     def _crop_by_bounds(
         self,
@@ -533,16 +629,8 @@ class ImageParser:
         x, y, w, h = crop_rect
         cropped = img.crop((x, y, x + w, y + h))
 
-        if cv2 is None or pytesseract is None:
-            result.warnings.append(
-                "OCR dependencies unavailable (opencv-python/pytesseract). Imported image unchanged."
-            )
-            return result
-
-        if not self._configure_tesseract_runtime():
-            result.warnings.append(
-                "Tesseract OCR engine is unavailable at runtime. Install `tesseract`, add it to PATH, or set `TESSERACT_CMD`."
-            )
+        if cv2 is None:
+            result.warnings.append("Image parsing dependency unavailable (opencv-python). Imported image unchanged.")
             return result
 
         cv_img = cv2.cvtColor(np.array(cropped), cv2.COLOR_RGB2BGR)
@@ -569,54 +657,8 @@ class ImageParser:
                 f"Structured clue detection parsed {parsed_rows}/{BOARD_SIZE} rows and {parsed_cols}/{BOARD_SIZE} columns."
             )
 
-        gray = cv2.cvtColor(cv_img, cv2.COLOR_BGR2GRAY)
-        blur = cv2.GaussianBlur(gray, (3, 3), 0)
-        processed = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
-
-        try:
-            data = pytesseract.image_to_data(processed, output_type=pytesseract.Output.DICT)
-        except pytesseract.TesseractNotFoundError:
-            result.warnings.append(
-                "Tesseract OCR engine is unavailable at runtime. Install `tesseract`, add it to PATH, or set `TESSERACT_CMD`."
-            )
-            return result
-        except pytesseract.TesseractError as exc:
-            result.warnings.append(
-                f"OCR failed with Tesseract error: {exc}. Enter clues manually."
-            )
-            return result
-        except Exception as exc:
-            result.warnings.append(
-                f"OCR failed while reading image: {exc}. Enter clues manually."
-            )
-            return result
-        tokens = self._extract_numeric_tokens(data)
-
-        if len(tokens) < 20:
-            result.warnings.append(
-                "Could not confidently read all clues from OCR. Please correct clues manually."
-            )
-            return result
-
-        pairs = self._make_pairs(tokens)
-        row_pairs = pairs[:BOARD_SIZE]
-        col_pairs = pairs[BOARD_SIZE : BOARD_SIZE * 2]
-
-        if len(col_pairs) < BOARD_SIZE:
-            result.warnings.append("OCR returned too few clue pairs. Applied partial import only.")
-
-        for idx, pair in enumerate(row_pairs):
-            if idx >= BOARD_SIZE:
-                break
-            result.row_clues[idx] = Clue(voltorbs=pair[0], total=pair[1])
-
-        for idx, pair in enumerate(col_pairs):
-            if idx >= BOARD_SIZE:
-                break
-            result.col_clues[idx] = Clue(voltorbs=pair[0], total=pair[1])
-
         result.warnings.append(
-            "OCR clue ordering is heuristic. Verify imported clues before trusting recommendations."
+            "Template matching could not parse all clues. Unmatched clue fields were saved under assets/templates/raw/clue_unknown for manual labeling."
         )
         return result
 
@@ -798,31 +840,8 @@ class ImageParser:
                 (1, 1),
             ]
 
-        top_token_map = {
-            "15": 5,
-            "ii": 5,
-            "is": 5,
-            "os": 5,
-            "if": 3,
-            "ie": 3,
-            "ue": 3,
-            "li": 7,
-            "l3": 2,
-        }
-        bottom_token_map = {
-            "al": 1,
-            "ge": 2,
-            "ag": 0,
-            "az": 3,
-            "10": 0,
-            "iz": 2,
-            "ae": 1,
-            "ii": 1,
-            "2": 2,
-        }
-
         for x, y, w, h in rects:
-            candidates: list[tuple[int, int]] = []
+            candidates: list[tuple[tuple[int, int], float]] = []
             if debug_lines is not None:
                 debug_lines.append(f"rect=({x},{y},{w},{h})")
 
@@ -834,43 +853,28 @@ class ImageParser:
                         debug_lines.append(f"sample[{sample_idx}] offset=({dx},{dy}) roi=empty")
                     continue
 
-                top_token_roi = self._crop_by_bounds(roi, self._TOTAL_TOKEN_BOUNDS)
-                bottom_token_roi = self._crop_by_bounds(roi, self._VOLTORB_TOKEN_BOUNDS)
-                top_token = self._read_pixel_token(top_token_roi)
-                bottom_token = self._read_pixel_token(bottom_token_roi)
-                if debug_lines is not None:
-                    debug_lines.append(
-                        f"sample[{sample_idx}] offset=({dx},{dy}) tokens: top='{top_token}' bottom='{bottom_token}'"
-                    )
-
-                token_total = top_token_map.get(top_token)
-                token_voltorbs = bottom_token_map.get(bottom_token)
-                if token_total is not None and token_voltorbs is not None:
-                    token_pair = (token_voltorbs, token_total)
-                    if self._is_plausible_clue(*token_pair):
-                        candidates.append(token_pair)
-                        if debug_lines is not None:
-                            debug_lines.append(
-                                f"sample[{sample_idx}] token_pair={token_pair} accepted"
-                            )
-                    elif debug_lines is not None:
-                        debug_lines.append(
-                            f"sample[{sample_idx}] token_pair={token_pair} rejected_plausibility"
-                        )
-                    continue
-
                 top_roi = self._crop_by_bounds(roi, self._TOTAL_OCR_BOUNDS)
                 bottom_roi = self._crop_by_bounds(roi, self._VOLTORB_OCR_BOUNDS)
 
-                total = self._ocr_number(top_roi, min_value=0, max_value=15, fast=fast_ocr)
-                voltorbs = self._ocr_number(bottom_roi, min_value=0, max_value=5, fast=fast_ocr)
-                if total is None:
-                    total = self._ocr_number_pixel_token(top_roi, min_value=0, max_value=15, kind="top")
-                if voltorbs is None:
-                    voltorbs = self._ocr_number_pixel_token(bottom_roi, min_value=0, max_value=5, kind="bottom")
+                total, total_score = self._match_number_template(
+                    top_roi,
+                    kind="top",
+                    min_value=0,
+                    max_value=15,
+                    save_if_unmatched=True,
+                    source_tag=f"rect:{x},{y},{w},{h}:sample:{sample_idx}:top",
+                )
+                voltorbs, voltorbs_score = self._match_number_template(
+                    bottom_roi,
+                    kind="bottom",
+                    min_value=0,
+                    max_value=5,
+                    save_if_unmatched=True,
+                    source_tag=f"rect:{x},{y},{w},{h}:sample:{sample_idx}:bottom",
+                )
                 if debug_lines is not None:
                     debug_lines.append(
-                        f"sample[{sample_idx}] ocr: voltorbs={voltorbs} total={total}"
+                        f"sample[{sample_idx}] template: voltorbs={voltorbs} s={voltorbs_score:.3f} total={total} s={total_score:.3f}"
                     )
 
                 if total is None or voltorbs is None:
@@ -878,13 +882,14 @@ class ImageParser:
                         debug_lines.append(f"sample[{sample_idx}] skipped_missing_value")
                     continue
 
-                ocr_pair = (voltorbs, total)
-                if self._is_plausible_clue(*ocr_pair):
-                    candidates.append(ocr_pair)
+                template_pair = (voltorbs, total)
+                if self._is_plausible_clue(*template_pair):
+                    combined_score = (voltorbs_score + total_score) / 2.0
+                    candidates.append((template_pair, combined_score))
                     if debug_lines is not None:
-                        debug_lines.append(f"sample[{sample_idx}] ocr_pair={ocr_pair} accepted")
+                        debug_lines.append(f"sample[{sample_idx}] template_pair={template_pair} accepted")
                 elif debug_lines is not None:
-                    debug_lines.append(f"sample[{sample_idx}] ocr_pair={ocr_pair} rejected_plausibility")
+                    debug_lines.append(f"sample[{sample_idx}] template_pair={template_pair} rejected_plausibility")
 
             if not candidates:
                 pairs.append(None)
@@ -892,11 +897,14 @@ class ImageParser:
                     debug_lines.append("candidates=[] -> result=None")
                 continue
 
-            votes = Counter(candidates)
-            (winner, count) = max(votes.items(), key=lambda item: item[1])
+            votes = Counter(pair for pair, _score in candidates)
+            avg_scores = {
+                pair: float(np.mean([score for p, score in candidates if p == pair])) for pair in votes
+            }
+            winner, count = max(votes.items(), key=lambda item: (item[1], avg_scores[item[0]]))
             if debug_lines is not None:
                 debug_lines.append(f"candidates={candidates}")
-                debug_lines.append(f"votes={dict(votes)} winner={winner} count={count}")
+                debug_lines.append(f"votes={dict(votes)} avg_scores={avg_scores} winner={winner} count={count}")
             # Require either majority agreement or at least 2 votes for the winner.
             if count >= 2 or len(votes) == 1:
                 pairs.append(winner)
@@ -919,154 +927,42 @@ class ImageParser:
         return min_total <= total <= max_total
 
     def _read_pixel_token(self, roi: np.ndarray) -> str:
-        if pytesseract is None or cv2 is None or roi.size == 0:
+        # Preserve API for compatibility; now based on template matching instead of OCR text.
+        value, score = self._match_number_template(
+            roi,
+            kind="top",
+            min_value=0,
+            max_value=15,
+            save_if_unmatched=False,
+            source_tag="token",
+        )
+        if value is None:
             return ""
-
-        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-        thresholded = cv2.threshold(gray, 110, 255, cv2.THRESH_BINARY)[1]
-        enlarged = cv2.resize(thresholded, None, fx=16.0, fy=16.0, interpolation=cv2.INTER_NEAREST)
-        try:
-            text = pytesseract.image_to_string(enlarged, config="--oem 3 --psm 10")
-        except Exception:
-            return ""
-        return re.sub(r"[^A-Za-z0-9]", "", text).lower()
+        return f"{value}@{score:.2f}"
 
     def _ocr_number(self, roi: np.ndarray, min_value: int, max_value: int, fast: bool = False) -> int | None:
-        if pytesseract is None or cv2 is None or roi.size == 0:
-            return None
-
-        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-        enlarged = cv2.resize(gray, None, fx=3.0, fy=3.0, interpolation=cv2.INTER_CUBIC)
-
-        nearest = cv2.resize(gray, None, fx=6.0, fy=6.0, interpolation=cv2.INTER_NEAREST)
-        if fast:
-            variants = [
-                nearest,
-                cv2.threshold(nearest, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1],
-            ]
-        else:
-            variants = [
-                nearest,
-                cv2.threshold(nearest, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1],
-                cv2.threshold(nearest, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1],
-            ]
-
-        char_map = {
-            "O": 0,
-            "o": 0,
-            "Q": 0,
-            "D": 0,
-            "I": 1,
-            "l": 1,
-            "|": 1,
-            "Z": 2,
-            "z": 2,
-            "S": 5,
-            "s": 5,
-            "T": 7,
-            "V": 7,
-            "v": 7,
-        }
-
-        config_base = "--oem 3 -c tessedit_char_whitelist=0123456789"
-        psm_modes = (10,) if fast else (10, 7)
-        candidate_scores: dict[int, int] = {}
-        for variant in variants:
-            for psm in psm_modes:
-                try:
-                    text = pytesseract.image_to_string(variant, config=f"{config_base} --psm {psm}")
-                except Exception:
-                    continue
-
-                digits = re.findall(r"\d+", text)
-                if digits:
-                    token = digits[0]
-                    value = int(token)
-                    if min_value <= value <= max_value:
-                        candidate_scores[value] = candidate_scores.get(value, 0) + 3
-
-                    # Pixel-font OCR often adds a leading "1" where the actual value is single-digit.
-                    if len(token) == 2 and token.startswith("1"):
-                        short_value = int(token[1])
-                        if min_value <= short_value <= max_value:
-                            candidate_scores[short_value] = candidate_scores.get(short_value, 0) + 2
-
-                    if token == "10" and min_value == 0:
-                        candidate_scores[0] = candidate_scores.get(0, 0) + 2
-
-                stripped = text.strip()
-                if len(stripped) == 1 and stripped in char_map:
-                    value = char_map[stripped]
-                    if min_value <= value <= max_value:
-                        candidate_scores[value] = candidate_scores.get(value, 0) + 1
-
-        if candidate_scores:
-            return max(candidate_scores.items(), key=lambda item: item[1])[0]
-
-        return None
+        _fast = fast
+        value, _score = self._match_number_template(
+            roi,
+            kind="top",
+            min_value=min_value,
+            max_value=max_value,
+            save_if_unmatched=True,
+            source_tag="ocr_number",
+        )
+        return value
 
     def _ocr_number_pixel_token(self, roi: np.ndarray, min_value: int, max_value: int, kind: str) -> int | None:
-        if pytesseract is None or cv2 is None or roi.size == 0:
-            return None
-
-        h, w = roi.shape[:2]
-        if kind == "top":
-            roi = roi[0:h, int(w * 0.45) : int(w * 0.95)]
-        else:
-            roi = roi[0:h, int(w * 0.20) : int(w * 0.98)]
-
-        if roi.size == 0:
-            return None
-
-        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-        thresholded = cv2.threshold(gray, 110, 255, cv2.THRESH_BINARY)[1]
-        enlarged = cv2.resize(thresholded, None, fx=16.0, fy=16.0, interpolation=cv2.INTER_NEAREST)
-
-        try:
-            text = pytesseract.image_to_string(enlarged, config="--oem 3 --psm 10")
-        except Exception:
-            return None
-
-        token = re.sub(r"[^A-Za-z0-9]", "", text).lower()
-        if not token:
-            return None
-
-        # Fallback map tuned for pixel-art clue digits where OCR returns letter-like artifacts.
-        if kind == "top":
-            token_map = {
-                "15": 5,
-                "ii": 5,
-                "is": 5,
-                "os": 5,
-                "if": 3,
-                "ie": 3,
-                "ue": 3,
-                "li": 7,
-                "l3": 2,
-            }
-        else:
-            token_map = {
-                "al": 1,
-                "ge": 2,
-                "ag": 0,
-                "az": 3,
-                "10": 0,
-                "iz": 2,
-                "ae": 1,
-                "if": 1,
-                "ii": 1,
-                "ile": 0,
-                "le": 0,
-                "id": 0,
-                "ig": 0,
-            }
-
-        if token in token_map:
-            value = token_map[token]
-            if min_value <= value <= max_value:
-                return value
-
-        return None
+        kind_key = "top" if kind == "top" else "bottom"
+        value, _score = self._match_number_template(
+            roi,
+            kind=kind_key,
+            min_value=min_value,
+            max_value=max_value,
+            save_if_unmatched=True,
+            source_tag=f"pixel_token:{kind_key}",
+        )
+        return value
 
     def _configure_tesseract_runtime(self) -> bool:
         if pytesseract is None:
