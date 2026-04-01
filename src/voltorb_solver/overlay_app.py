@@ -24,7 +24,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from voltorb_solver.image_import.parser import ImageParser
+from voltorb_solver.game_state import GameState
+from voltorb_solver.image_import.parser import ImageParser, TileDebugArtifacts
 from voltorb_solver.image_import.screen_parser import Region, ScreenBoardParser
 
 
@@ -251,6 +252,9 @@ class OverlayControlWindow(QMainWindow):
         self._last_image_size: tuple[int, int] | None = None
         self._last_parse_regions: list[Region] = []
         self._clue_dataset_root = Path("assets/parser_debug/clue_dataset")
+        self._tile_dataset_root = Path("assets/parser_debug/tile_dataset")
+        self._tile_parsed_values: dict[str, int | None] = {}
+        self._game_state = GameState()
 
         root = QWidget()
         root.setObjectName("RootPanel")
@@ -333,6 +337,9 @@ class OverlayControlWindow(QMainWindow):
         self.parse_all_clues_btn = QPushButton("Parse clues")
         self.parse_all_clues_btn.setObjectName("PrimaryButton")
         self.parse_all_clues_btn.clicked.connect(self.parse_all_clues)
+        self.parse_tiles_btn = QPushButton("Parse tiles")
+        self.parse_tiles_btn.setObjectName("SecondaryButton")
+        self.parse_tiles_btn.clicked.connect(self.parse_tiles)
         self.clear_btn = QPushButton("Clear all")
         self.clear_btn.setObjectName("DangerButton")
         self.clear_btn.clicked.connect(self.clear_overlay)
@@ -347,6 +354,7 @@ class OverlayControlWindow(QMainWindow):
         button_row.addWidget(self.target_window_btn)
         button_row.addWidget(self.relabel_btn)
         button_row.addWidget(self.parse_all_clues_btn)
+        button_row.addWidget(self.parse_tiles_btn)
         button_row.addWidget(self.clear_btn)
         actions_layout.addLayout(options_row)
         actions_layout.addLayout(button_row)
@@ -682,6 +690,8 @@ class OverlayControlWindow(QMainWindow):
         self._cached_regions = []
         self._last_capture_signature = None
         self._clue_parsed_values = {}
+        self._tile_parsed_values = {}
+        self._game_state.reset()
         self._last_image_size = None
         self._last_parse_regions = []
         self._set_status("Overlay cleared.", level="info")
@@ -876,6 +886,9 @@ class OverlayControlWindow(QMainWindow):
             return False
         return name[1:].isdigit()
 
+    def _is_tile_region(self, name: str) -> bool:
+        return bool(re.match(r"^\(\d,\d\)$", name))
+
     def _subregion_from_bounds(
         self,
         region: Region,
@@ -888,11 +901,13 @@ class OverlayControlWindow(QMainWindow):
         y1 = region.y + max(y0 - region.y + 1, min(int(round(region.h * y1_f)), region.h))
         return x0, y0, max(1, x1 - x0), max(1, y1 - y0)
 
-    def _apply_clue_label_updates(self) -> None:
+    def _apply_all_label_updates(self) -> None:
+        """Push all parsed labels (clue and tile) to the overlay in a single pass."""
         if self._last_image_size is None:
             return
         labeled = []
         for region in self._cached_regions:
+            # Clue subregion labels: "r0.total" → "r0.total=12", "r0.voltorbs" → "r0.v=2"
             if "." in region.name:
                 clue_name, field = region.name.rsplit(".", 1)
                 values = self._clue_parsed_values.get(clue_name)
@@ -906,8 +921,25 @@ class OverlayControlWindow(QMainWindow):
                         new_name = region.name
                     labeled.append(Region(new_name, region.x, region.y, region.w, region.h))
                     continue
+            # Tile region labels: "(0,1)" → "(0,1)=2", "(0,1)=V", "(0,1)=-"
+            elif self._is_tile_region(region.name) and region.name in self._tile_parsed_values:
+                raw_value = self._tile_parsed_values[region.name]
+                if raw_value is None:
+                    display = "-"
+                elif raw_value == 0:
+                    display = "V"
+                else:
+                    display = str(raw_value)
+                labeled.append(Region(f"{region.name}={display}", region.x, region.y, region.w, region.h))
+                continue
             labeled.append(region)
         self.x11_overlay.set_overlay_data(labeled, *self._last_image_size)
+
+    def _apply_clue_label_updates(self) -> None:
+        self._apply_all_label_updates()
+
+    def _apply_tile_label_updates(self) -> None:
+        self._apply_all_label_updates()
 
     def parse_all_clues(self) -> None:
         if self.state.last_input_path is None:
@@ -959,6 +991,64 @@ class OverlayControlWindow(QMainWindow):
         else:
             self._set_status(
                 f"Parsed all {parsed_count} clues. Overlay labels updated.",
+                level="success",
+            )
+
+    def parse_tiles(self) -> None:
+        if self.state.last_input_path is None:
+            self._show_error("Label the game first.")
+            return
+
+        tile_regions = [r for r in self._last_parse_regions if self._is_tile_region(r.name)]
+        if not tile_regions:
+            self._show_error("No tile regions found. Label the game first.")
+            return
+
+        debug = self.debug_checkbox.isChecked()
+        debug_run_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f") if debug else None
+        for region in tile_regions:
+            if debug:
+                artifacts = self.clue_parser.debug_parse_tile_from_screenshot(
+                    self.state.last_input_path,
+                    (region.x, region.y, region.w, region.h),
+                    output_root=self._tile_dataset_root / "debug_parse",
+                    region_name=region.name,
+                    run_id=debug_run_id,
+                )
+                value = artifacts.result if artifacts is not None else None
+            else:
+                value = self.clue_parser.parse_tile_from_screenshot(
+                    self.state.last_input_path,
+                    (region.x, region.y, region.w, region.h),
+                )
+            self._tile_parsed_values[region.name] = value
+            m = re.match(r"^\((\d),(\d)\)$", region.name)
+            if m:
+                r_idx, c_idx = int(m.group(1)), int(m.group(2))
+                if value is None:
+                    self._game_state.set_tile_hidden(r_idx, c_idx)
+                else:
+                    self._game_state.set_tile_revealed(r_idx, c_idx, value)
+
+        self._apply_tile_label_updates()
+
+        n_revealed = sum(1 for v in self._tile_parsed_values.values() if v is not None)
+        n_total = len(tile_regions)
+        if n_revealed == 0:
+            self._set_status(
+                "No tiles classified. Templates may be missing — "
+                "check assets/parser_debug/tile_dataset/unknown/ for samples to label.",
+                level="warning",
+            )
+        elif n_revealed < n_total:
+            self._set_status(
+                f"Classified {n_revealed}/{n_total} tiles. "
+                f"{n_total - n_revealed} closed/unclassified. Overlay labels updated.",
+                level="warning",
+            )
+        else:
+            self._set_status(
+                f"Classified all {n_revealed} tiles. Overlay labels updated.",
                 level="success",
             )
 

@@ -213,8 +213,8 @@ def test_debug_parse_clue_from_screenshot_writes_artifacts_and_log(monkeypatch, 
 
     log_text = artifacts.log_path.read_text(encoding="utf-8")
     assert "region=r2" in log_text
-    assert "voltorbs_text='template:2@0.950'" in log_text
-    assert "total_text='template:2@0.950'" in log_text
+    assert "voltorbs_text='match:2 score=0.950'" in log_text
+    assert "total_text='match:2 score=0.950'" in log_text
 
 
 def test_save_unmatched_template_sample_writes_manifest(tmp_path: Path, monkeypatch) -> None:
@@ -233,3 +233,113 @@ def test_save_unmatched_template_sample_writes_manifest(tmp_path: Path, monkeypa
     rows = manifest.read_text(encoding="utf-8")
     assert "kind,path,source" in rows
     assert ",top," in rows
+
+
+# ---------------------------------------------------------------------------
+# Tile state classification
+# ---------------------------------------------------------------------------
+
+
+def _make_tile_cv2(match_scores: list[float]):
+    """Return a fake cv2 namespace that yields successive match scores from the list."""
+    call_idx = [0]
+
+    def fake_matchTemplate(img, tmpl, method):
+        score = match_scores[min(call_idx[0], len(match_scores) - 1)]
+        call_idx[0] += 1
+        return np.array([[score]], dtype=np.float32)
+
+    fake = types.SimpleNamespace()
+    fake.COLOR_BGR2GRAY = 6
+    fake.INTER_AREA = 3
+    fake.TM_CCOEFF_NORMED = 5
+    fake.cvtColor = lambda img, code: img[:, :, 0] if img.ndim == 3 else img
+    fake.resize = lambda img, size, **kw: np.full((size[1], size[0]), 64, dtype=np.uint8)
+    fake.matchTemplate = fake_matchTemplate
+    fake.minMaxLoc = lambda result: (0.0, float(result[0, 0]), (0, 0), (0, 0))
+    return fake
+
+
+def _preloaded_parser(closed_templates, state_bank):
+    """Return an ImageParser with tile template banks pre-populated (skip disk loading)."""
+    parser = ImageParser()
+    parser._closed_tile_templates_loaded = True
+    parser._tile_state_templates_loaded = True
+    parser._closed_tile_templates = list(closed_templates)
+    parser._tile_state_bank = dict(state_bank)
+    return parser
+
+
+def test_parse_tile_state_returns_none_with_empty_closed_bank(monkeypatch) -> None:
+    parser = _preloaded_parser([], {})
+    fake_cv2 = types.SimpleNamespace()
+    monkeypatch.setattr(parser_module, "cv2", fake_cv2)
+
+    crop = np.zeros((64, 64, 3), dtype=np.uint8)
+    result = parser.parse_tile_state(crop)
+
+    assert result is None
+
+
+def test_parse_tile_state_detects_closed_tile(monkeypatch) -> None:
+    dummy_tpl = np.full((64, 64), 64, dtype=np.uint8)
+    parser = _preloaded_parser([dummy_tpl], {})
+    # Single match call at high score → closed tile → None
+    monkeypatch.setattr(parser_module, "cv2", _make_tile_cv2([1.0]))
+
+    crop = np.full((80, 80, 3), 64, dtype=np.uint8)
+    result = parser.parse_tile_state(crop)
+
+    assert result is None  # unopen tile
+
+
+def test_parse_tile_state_matches_value(monkeypatch) -> None:
+    dummy_tpl = np.full((64, 64), 64, dtype=np.uint8)
+    parser = _preloaded_parser([dummy_tpl], {2: [dummy_tpl]})
+    # First call (closed check) → low score; second call (value match) → high score
+    monkeypatch.setattr(parser_module, "cv2", _make_tile_cv2([0.2, 0.92]))
+
+    crop = np.full((80, 80, 3), 64, dtype=np.uint8)
+    result = parser.parse_tile_state(crop)
+
+    assert result == 2
+
+
+def test_parse_tile_state_saves_unknown_when_open_and_no_match(monkeypatch, tmp_path: Path) -> None:
+    dummy_tpl = np.full((64, 64), 64, dtype=np.uint8)
+    parser = _preloaded_parser([dummy_tpl], {1: [dummy_tpl]})
+    monkeypatch.setattr(parser, "_project_root", lambda: tmp_path)
+
+    saved: list[str] = []
+    fake = _make_tile_cv2([0.2, 0.2])  # all match attempts fail below threshold
+    fake.imwrite = lambda path, img: saved.append(path) or True
+    monkeypatch.setattr(parser_module, "cv2", fake)
+
+    crop = np.full((64, 64, 3), 64, dtype=np.uint8)
+    result = parser.parse_tile_state(crop, region_name="(2,3)", image_path="test.png")
+
+    assert result is None
+    assert len(saved) > 0
+    out_dir = tmp_path / "assets/parser_debug/tile_dataset/unknown"
+    assert out_dir.exists()
+
+
+def test_parse_tile_from_screenshot_crops_and_delegates(monkeypatch) -> None:
+    parser = ImageParser()
+
+    captured: list[tuple[int, ...]] = []
+
+    def fake_parse_tile_state(crop, **kwargs):
+        captured.append(crop.shape)
+        return 3
+
+    fake_cv2 = types.SimpleNamespace()
+    fake_cv2.imread = lambda _path: np.zeros((100, 200, 3), dtype=np.uint8)
+    monkeypatch.setattr(parser_module, "cv2", fake_cv2)
+    monkeypatch.setattr(parser, "parse_tile_state", fake_parse_tile_state)
+
+    result = parser.parse_tile_from_screenshot("dummy.png", (10, 20, 30, 25))
+
+    assert result == 3
+    assert len(captured) == 1
+    assert captured[0][:2] == (25, 30)  # numpy shape (h, w)

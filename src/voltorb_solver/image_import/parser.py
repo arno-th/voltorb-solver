@@ -50,6 +50,18 @@ class ClueDebugArtifacts:
     total_score: float
 
 
+@dataclass(slots=True)
+class TileDebugArtifacts:
+    raw_crop_path: Path
+    canonical_path: Path
+    log_path: Path
+    is_closed: bool
+    closed_score: float
+    matched_value: int | None
+    state_score: float
+    result: int | None
+
+
 class ImageParser:
     # Normalized clue-field bounds (x0, y0, x1, y1) inside a single clue box.
     # Used by overlay_app.py to generate debug sub-region overlays.
@@ -57,12 +69,19 @@ class ImageParser:
     _VOLTORB_OCR_BOUNDS = (0.615, 0.50, 0.99, 0.98)
 
     _TEMPLATE_MIN_SCORE = 0.85
+    TILE_CLOSED_MIN_SCORE = 0.75
+    TILE_STATE_MIN_SCORE = 0.78
+    _TILE_CANONICAL_SIZE = (64, 64)
 
     def __init__(self) -> None:
         self._templates_loaded = False
         self._template_bank: dict[str, dict[int, list[np.ndarray]]] = {"top": {}, "bottom": {}}
         self._unmatched_saved_hashes: set[str] = set()
         self.last_clue_debug: list[str] = []
+        self._closed_tile_templates: list[np.ndarray] = []
+        self._closed_tile_templates_loaded = False
+        self._tile_state_bank: dict[int, list[np.ndarray]] = {}
+        self._tile_state_templates_loaded = False
 
     def _project_root(self) -> Path:
         return Path(__file__).resolve().parents[3]
@@ -245,6 +264,287 @@ class ImageParser:
         with manifest_path.open("a", encoding="utf-8") as fh:
             rel = out_path.relative_to(self._project_root())
             fh.write(f"{stamp},{kind},{rel.as_posix()},{source_tag}\n")
+
+    # --- Tile state classification ---
+
+    def _load_closed_tile_templates(self) -> None:
+        if self._closed_tile_templates_loaded or cv2 is None:
+            return
+        self._closed_tile_templates_loaded = True
+        project_root = self._project_root()
+        for root_rel in ("assets/templates", "assets/templates/raw"):
+            root = project_root / root_rel
+            if not root.exists():
+                continue
+            for image_path in root.rglob("*.png"):
+                stem = image_path.stem.lower()
+                if not re.search(r"^game_tile_\d+$", stem):
+                    continue
+                image = cv2.imread(str(image_path))
+                if image is None:
+                    continue
+                gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+                canonical = cv2.resize(
+                    gray, self._TILE_CANONICAL_SIZE, interpolation=cv2.INTER_AREA
+                )
+                self._closed_tile_templates.append(canonical)
+
+    def _load_tile_state_templates(self) -> None:
+        if self._tile_state_templates_loaded or cv2 is None:
+            return
+        self._tile_state_templates_loaded = True
+        project_root = self._project_root()
+        value_map = {"voltorb": 0, "1": 1, "2": 2, "3": 3}
+        for root_rel in ("assets/templates", "assets/templates/raw"):
+            root = project_root / root_rel
+            if not root.exists():
+                continue
+            for image_path in root.rglob("*.png"):
+                stem = image_path.stem.lower()
+                m = re.search(r"^tile_state_(.+)$", stem)
+                if m is None:
+                    continue
+                suffix = m.group(1)
+                value = value_map.get(suffix)
+                if value is None:
+                    try:
+                        value = int(suffix)
+                    except ValueError:
+                        continue
+                    if value not in (0, 1, 2, 3):
+                        continue
+                image = cv2.imread(str(image_path))
+                if image is None:
+                    continue
+                gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+                canonical = cv2.resize(
+                    gray, self._TILE_CANONICAL_SIZE, interpolation=cv2.INTER_AREA
+                )
+                self._tile_state_bank.setdefault(value, []).append(canonical)
+
+    def _tile_crop_to_canonical(self, crop: np.ndarray) -> np.ndarray | None:
+        if cv2 is None or crop.size == 0:
+            return None
+        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY) if crop.ndim == 3 else crop
+        return cv2.resize(gray, self._TILE_CANONICAL_SIZE, interpolation=cv2.INTER_AREA)
+
+    def _is_tile_closed(self, tile_crop: np.ndarray) -> tuple[bool, float]:
+        """Return (True, score) if the crop best matches a known closed-tile template."""
+        canonical = self._tile_crop_to_canonical(tile_crop)
+        if canonical is None or not self._closed_tile_templates:
+            return False, -1.0
+        best_score = -1.0
+        for template in self._closed_tile_templates:
+            result = cv2.matchTemplate(canonical, template, cv2.TM_CCOEFF_NORMED)
+            _, max_val, _, _ = cv2.minMaxLoc(result)
+            if float(max_val) > best_score:
+                best_score = float(max_val)
+        return best_score >= self.TILE_CLOSED_MIN_SCORE, best_score
+
+    def _match_tile_state_template(self, tile_crop: np.ndarray) -> tuple[int | None, float]:
+        """Return (value, score) for the best-matching tile-state template, or (None, score)."""
+        canonical = self._tile_crop_to_canonical(tile_crop)
+        if canonical is None or not self._tile_state_bank:
+            return None, -1.0
+        best_value: int | None = None
+        best_score = -1.0
+        for value, templates in self._tile_state_bank.items():
+            for template in templates:
+                result = cv2.matchTemplate(canonical, template, cv2.TM_CCOEFF_NORMED)
+                _, max_val, _, _ = cv2.minMaxLoc(result)
+                score = float(max_val)
+                if score > best_score:
+                    best_score = score
+                    best_value = value
+        if best_value is not None and best_score >= self.TILE_STATE_MIN_SCORE:
+            return best_value, best_score
+        return None, best_score
+
+    def parse_tile_state(
+        self,
+        tile_crop: np.ndarray,
+        *,
+        region_name: str = "",
+        image_path: str = "",
+    ) -> int | None:
+        """Classify one tile crop.
+
+        Returns:
+            None  — tile is unopen (matched closed template) or classification
+                    is impossible (no closed templates loaded).
+            0     — voltorb.
+            1/2/3 — revealed safe tile with that value.
+
+        If the tile appears open but no template matches confidently, the crop
+        is saved to ``assets/parser_debug/tile_dataset/unknown/`` for later labeling.
+        """
+        self._load_closed_tile_templates()
+        self._load_tile_state_templates()
+
+        if not self._closed_tile_templates:
+            return None
+
+        is_closed, _ = self._is_tile_closed(tile_crop)
+        if is_closed:
+            return None  # tile is unopen — not an error
+
+        # Tile appears open — try matching a known revealed-tile value.
+        if self._tile_state_bank:
+            value, _ = self._match_tile_state_template(tile_crop)
+            if value is not None:
+                return value
+
+        # Open tile with no confident match — save for labeling.
+        self._save_unknown_tile_crop(tile_crop, region_name=region_name, image_path=image_path)
+        return None
+
+    def _save_unknown_tile_crop(
+        self,
+        crop: np.ndarray,
+        *,
+        region_name: str,
+        image_path: str,
+    ) -> None:
+        if cv2 is None or crop.size == 0:
+            return
+
+        digest = hashlib.sha1(crop.tobytes()).hexdigest()[:12]
+        key = f"tile:{digest}"
+        if key in self._unmatched_saved_hashes:
+            return
+        self._unmatched_saved_hashes.add(key)
+
+        out_dir = self._project_root() / "assets/parser_debug/tile_dataset/unknown"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        file_name = f"{stamp}_{digest}.png"
+        out_path = out_dir / file_name
+        cv2.imwrite(str(out_path), crop)
+
+        manifest_path = self._project_root() / "assets/parser_debug/tile_dataset/manifest.csv"
+        if not manifest_path.exists():
+            manifest_path.write_text(
+                "timestamp,split,crop_path,source_path,region,x,y,w,h,manual_value\n",
+                encoding="utf-8",
+            )
+        with manifest_path.open("a", encoding="utf-8") as fh:
+            rel = out_path.relative_to(self._project_root())
+            fh.write(f"{stamp},unknown,{rel.as_posix()},{image_path},{region_name},,,,\n")
+
+    def parse_tile_from_screenshot(
+        self,
+        image_path: str,
+        tile_box: tuple[int, int, int, int],
+    ) -> int | None:
+        """Crop one tile from a screenshot and classify its state."""
+        x, y, w, h = tile_box
+        if w <= 0 or h <= 0:
+            return None
+        if cv2 is None:
+            return None
+        image = cv2.imread(image_path)
+        if image is None:
+            return None
+        img_h, img_w = image.shape[:2]
+        x0 = max(0, min(x, img_w - 1))
+        y0 = max(0, min(y, img_h - 1))
+        x1 = max(x0 + 1, min(x + w, img_w))
+        y1 = max(y0 + 1, min(y + h, img_h))
+        crop = image[y0:y1, x0:x1]
+        if crop.size == 0:
+            return None
+        return self.parse_tile_state(
+            crop.copy(), region_name=str(tile_box), image_path=image_path
+        )
+
+    def debug_parse_tile_from_screenshot(
+        self,
+        image_path: str,
+        tile_box: tuple[int, int, int, int],
+        *,
+        output_root: str | Path,
+        region_name: str = "tile",
+        run_id: str | None = None,
+    ) -> TileDebugArtifacts | None:
+        """Like parse_tile_from_screenshot but saves debug artifacts to output_root."""
+        if cv2 is None:
+            return None
+
+        x, y, w, h = tile_box
+        if w <= 0 or h <= 0:
+            return None
+
+        image = cv2.imread(image_path)
+        if image is None:
+            return None
+
+        img_h, img_w = image.shape[:2]
+        x0 = max(0, min(x, img_w - 1))
+        y0 = max(0, min(y, img_h - 1))
+        x1 = max(x0 + 1, min(x + w, img_w))
+        y1 = max(y0 + 1, min(y + h, img_h))
+        crop = image[y0:y1, x0:x1]
+        if crop.size == 0:
+            return None
+        crop = crop.copy()
+
+        self._load_closed_tile_templates()
+        self._load_tile_state_templates()
+
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        output_root_path = Path(output_root)
+        if run_id:
+            run_dir = output_root_path / run_id / region_name
+        else:
+            run_dir = output_root_path / f"{region_name}_{ts}"
+        run_dir.mkdir(parents=True, exist_ok=True)
+
+        raw_crop_path = run_dir / "raw_crop.png"
+        canonical_path = run_dir / "canonical.png"
+        log_path = run_dir / "debug.log"
+
+        cv2.imwrite(str(raw_crop_path), crop)
+
+        canonical = self._tile_crop_to_canonical(crop)
+        if canonical is not None:
+            cv2.imwrite(str(canonical_path), canonical)
+
+        is_closed, closed_score = self._is_tile_closed(crop)
+
+        matched_value: int | None = None
+        state_score = -1.0
+        if not is_closed and self._tile_state_bank:
+            matched_value, state_score = self._match_tile_state_template(crop)
+
+        result: int | None = None
+        if not is_closed and matched_value is not None:
+            result = matched_value
+
+        log_lines = [
+            f"source={image_path}",
+            f"run_id={run_id}",
+            f"region={region_name}",
+            f"tile_box=({x},{y},{w},{h})",
+            f"closed_templates={len(self._closed_tile_templates)}",
+            f"state_bank_keys={sorted(self._tile_state_bank.keys())}",
+            f"is_closed={is_closed}",
+            f"closed_score={closed_score:.3f}",
+            f"matched_value={matched_value}",
+            f"state_score={state_score:.3f}",
+            f"result={result}",
+        ]
+        log_path.write_text("\n".join(log_lines) + "\n", encoding="utf-8")
+
+        return TileDebugArtifacts(
+            raw_crop_path=raw_crop_path,
+            canonical_path=canonical_path,
+            log_path=log_path,
+            is_closed=is_closed,
+            closed_score=closed_score,
+            matched_value=matched_value,
+            state_score=state_score,
+            result=result,
+        )
 
     def _clue_ocr_backend_order(self) -> list[str]:
         return ["template"]
