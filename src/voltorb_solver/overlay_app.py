@@ -189,8 +189,13 @@ class ProbabilityLabelWindow(QWidget):
 
     def place_at(self, rect: QRect, screen=None) -> None:
         _bind_widget_to_screen(self, screen)
-        self.setGeometry(rect)
-        self._label.setGeometry(0, 0, rect.width(), rect.height())
+        # Show a small badge in the bottom-right corner rather than covering the whole tile.
+        badge_w = max(42, rect.width() // 2)
+        badge_h = max(22, rect.height() // 3)
+        bx = rect.right() - badge_w + 1
+        by = rect.bottom() - badge_h + 1
+        self.setGeometry(bx, by, badge_w, badge_h)
+        self._label.setGeometry(0, 0, badge_w, badge_h)
 
 
 class SimpleProbabilityOverlay:
@@ -1175,6 +1180,13 @@ class OverlayControlWindow(QMainWindow):
         debug = self.debug_checkbox.isChecked()
         debug_run_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f") if debug else None
         prev_unmatched = len(self.clue_parser._unmatched_saved_hashes)
+
+        # Reset tile state so removed/changed tiles are not carried over from a previous parse.
+        self._tile_parsed_values = {}
+        for r_idx in range(5):
+            for c_idx in range(5):
+                self._game_state.set_tile_hidden(r_idx, c_idx)
+
         for region in tile_regions:
             if debug:
                 artifacts = self.clue_parser.debug_parse_tile_from_screenshot(
