@@ -59,6 +59,7 @@ class TileDebugArtifacts:
     closed_score: float
     matched_value: int | None
     state_score: float
+    winner: str
     result: int | None
 
 
@@ -278,7 +279,7 @@ class ImageParser:
                 continue
             for image_path in root.rglob("*.png"):
                 stem = image_path.stem.lower()
-                if not re.search(r"^game_tile_\d+$", stem):
+                if not (re.search(r"^closed_tile", stem) or stem == "game_tile_e"):
                     continue
                 image = cv2.imread(str(image_path))
                 if image is None:
@@ -294,14 +295,50 @@ class ImageParser:
             return
         self._tile_state_templates_loaded = True
         project_root = self._project_root()
-        value_map = {"voltorb": 0, "1": 1, "2": 2, "3": 3}
+        value_map = {"voltorb": 0, "v": 0, "1": 1, "2": 2, "3": 3}
+
+        # Load from labeled tile dataset manifest (mirrors clue template loading).
+        manifest_path = project_root / "assets/parser_debug/tile_dataset/manifest.csv"
+        if manifest_path.exists():
+            try:
+                with manifest_path.open("r", encoding="utf-8", newline="") as fh:
+                    reader = csv.DictReader(fh)
+                    for row in reader:
+                        if row.get("split", "").strip().lower() != "labeled":
+                            continue
+                        raw_value = row.get("manual_value", "").strip().lower()
+                        value = value_map.get(raw_value)
+                        if value is None:
+                            try:
+                                value = int(raw_value)
+                            except ValueError:
+                                continue
+                            if value not in (0, 1, 2, 3):
+                                continue
+                        rel_crop = row.get("crop_path", "").strip()
+                        if not rel_crop:
+                            continue
+                        crop_path = self._resolve_project_path(rel_crop)
+                        image = cv2.imread(str(crop_path))
+                        if image is None:
+                            continue
+                        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+                        canonical = cv2.resize(
+                            gray, self._TILE_CANONICAL_SIZE, interpolation=cv2.INTER_AREA
+                        )
+                        self._tile_state_bank.setdefault(value, []).append(canonical)
+            except Exception:
+                pass
+
         for root_rel in ("assets/templates", "assets/templates/raw"):
             root = project_root / root_rel
             if not root.exists():
                 continue
             for image_path in root.rglob("*.png"):
                 stem = image_path.stem.lower()
-                m = re.search(r"^tile_state_(.+)$", stem)
+                # Accept tile_state_<suffix>, game_tile_<N>, game_tile_v (voltorb), or game_tile_0 (voltorb).
+                # game_tile_e is the closed/unopen tile and is handled separately.
+                m = re.search(r"^tile_state_(.+)$", stem) or re.search(r"^game_tile_(\d+|v)$", stem)
                 if m is None:
                     continue
                 suffix = m.group(1)
@@ -370,31 +407,41 @@ class ImageParser:
         """Classify one tile crop.
 
         Returns:
-            None  — tile is unopen (matched closed template) or classification
-                    is impossible (no closed templates loaded).
+            None  — tile is unopen (best match is the closed template), or no
+                    templates are loaded at all so classification is impossible.
             0     — voltorb.
             1/2/3 — revealed safe tile with that value.
 
-        If the tile appears open but no template matches confidently, the crop
-        is saved to ``assets/parser_debug/tile_dataset/unknown/`` for later labeling.
+        When both closed and state templates are present, the highest-scoring
+        match wins (competitive comparison).  This prevents a revealed tile from
+        being silently classified as closed just because it clears the closed
+        threshold.
+
+        If the tile appears open but no state template matches confidently, the
+        crop is saved to ``assets/parser_debug/tile_dataset/unknown/`` for later
+        labeling.
         """
         self._load_closed_tile_templates()
         self._load_tile_state_templates()
 
-        if not self._closed_tile_templates:
+        has_closed = bool(self._closed_tile_templates)
+        has_state = bool(self._tile_state_bank)
+
+        if not has_closed and not has_state:
             return None
 
-        is_closed, _ = self._is_tile_closed(tile_crop)
-        if is_closed:
-            return None  # tile is unopen — not an error
+        _, closed_score = self._is_tile_closed(tile_crop) if has_closed else (False, -1.0)
+        state_value, state_score = self._match_tile_state_template(tile_crop) if has_state else (None, -1.0)
 
-        # Tile appears open — try matching a known revealed-tile value.
-        if self._tile_state_bank:
-            value, _ = self._match_tile_state_template(tile_crop)
-            if value is not None:
-                return value
+        # Prefer whichever side scored higher.
+        if has_closed and (not has_state or closed_score >= state_score):
+            if closed_score >= self.TILE_CLOSED_MIN_SCORE:
+                return None  # tile is unopen
 
-        # Open tile with no confident match — save for labeling.
+        if state_value is not None:
+            return state_value
+
+        # Tile appears open but no state template matched — save for labeling.
         self._save_unknown_tile_crop(tile_crop, region_name=region_name, image_path=image_path)
         return None
 
@@ -513,11 +560,14 @@ class ImageParser:
 
         matched_value: int | None = None
         state_score = -1.0
-        if not is_closed and self._tile_state_bank:
+        if self._tile_state_bank:
             matched_value, state_score = self._match_tile_state_template(crop)
 
+        # Competitive comparison: state wins when its score exceeds the closed score.
         result: int | None = None
-        if not is_closed and matched_value is not None:
+        if matched_value is not None and state_score > closed_score:
+            result = matched_value
+        elif closed_score < self.TILE_CLOSED_MIN_SCORE and matched_value is not None:
             result = matched_value
 
         log_lines = [
@@ -531,6 +581,7 @@ class ImageParser:
             f"closed_score={closed_score:.3f}",
             f"matched_value={matched_value}",
             f"state_score={state_score:.3f}",
+            f"winner={'state' if result is not None else 'closed'}",
             f"result={result}",
         ]
         log_path.write_text("\n".join(log_lines) + "\n", encoding="utf-8")
@@ -543,6 +594,7 @@ class ImageParser:
             closed_score=closed_score,
             matched_value=matched_value,
             state_score=state_score,
+            winner='state' if result is not None else 'closed',
             result=result,
         )
 

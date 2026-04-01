@@ -1006,6 +1006,7 @@ class OverlayControlWindow(QMainWindow):
 
         debug = self.debug_checkbox.isChecked()
         debug_run_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f") if debug else None
+        prev_unmatched = len(self.clue_parser._unmatched_saved_hashes)
         for region in tile_regions:
             if debug:
                 artifacts = self.clue_parser.debug_parse_tile_from_screenshot(
@@ -1034,17 +1035,31 @@ class OverlayControlWindow(QMainWindow):
 
         n_revealed = sum(1 for v in self._tile_parsed_values.values() if v is not None)
         n_total = len(tile_regions)
-        if n_revealed == 0:
+        n_unmatched = len(self.clue_parser._unmatched_saved_hashes) - prev_unmatched
+        n_closed = n_total - n_revealed - n_unmatched
+
+        if n_unmatched > 0 and n_revealed == 0:
             self._set_status(
-                "No tiles classified. Templates may be missing — "
-                "check assets/parser_debug/tile_dataset/unknown/ for samples to label.",
+                f"No tiles classified. {n_unmatched} open tile(s) saved to "
+                "assets/parser_debug/tile_dataset/unknown/ for labeling.",
                 level="warning",
+            )
+        elif n_unmatched > 0:
+            self._set_status(
+                f"Classified {n_revealed} revealed + {n_closed} closed. "
+                f"{n_unmatched} open tile(s) saved to unknown/ for labeling.",
+                level="warning",
+            )
+        elif n_revealed == 0:
+            self._set_status(
+                f"All {n_total} tiles appear face-down (closed). Overlay labels updated.",
+                level="success",
             )
         elif n_revealed < n_total:
             self._set_status(
-                f"Classified {n_revealed}/{n_total} tiles. "
-                f"{n_total - n_revealed} closed/unclassified. Overlay labels updated.",
-                level="warning",
+                f"Classified {n_revealed} revealed + {n_closed} closed ({n_total} total). "
+                "Overlay labels updated.",
+                level="success",
             )
         else:
             self._set_status(
