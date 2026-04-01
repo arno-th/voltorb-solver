@@ -37,10 +37,11 @@ class ParseResult:
 
 @dataclass(slots=True)
 class ClueDebugArtifacts:
-    raw_voltorbs_path: Path
-    raw_total_path: Path
-    normalized_voltorbs_path: Path
-    normalized_total_path: Path
+    raw_crop_path: Path
+    raw_voltorbs_path: Path | None
+    raw_total_path: Path | None
+    normalized_voltorbs_path: Path | None
+    normalized_total_path: Path | None
     log_path: Path
     voltorbs_text: str
     total_text: str
@@ -69,14 +70,17 @@ class ImageParser:
     _TOTAL_OCR_BOUNDS = (0.30, 0.02, 0.99, 0.42)
     _VOLTORB_OCR_BOUNDS = (0.615, 0.50, 0.99, 0.98)
 
-    _TEMPLATE_MIN_SCORE = 0.85
+    _TEMPLATE_MIN_SCORE = 0.90
     TILE_CLOSED_MIN_SCORE = 0.75
     TILE_STATE_MIN_SCORE = 0.78
     _TILE_CANONICAL_SIZE = (64, 64)
 
     def __init__(self) -> None:
         self._templates_loaded = False
-        self._template_bank: dict[str, dict[int, list[np.ndarray]]] = {"top": {}, "bottom": {}}
+        self._template_bank: dict[str, dict[int, list[np.ndarray]]] = {
+            "row_top": {}, "row_bottom": {},
+            "col_top": {}, "col_bottom": {},
+        }
         self._unmatched_saved_hashes: set[str] = set()
         self.last_clue_debug: list[str] = []
         self._closed_tile_templates: list[np.ndarray] = []
@@ -155,6 +159,8 @@ class ImageParser:
                         rel_crop = row.get("crop_path", "").strip()
                         if label is None or not rel_crop:
                             continue
+                        region_name = row.get("region", "").strip()
+                        axis = self._axis_from_region_name(region_name)
                         crop_path = self._resolve_project_path(rel_crop)
                         crop = cv2.imread(str(crop_path))
                         if crop is None:
@@ -165,24 +171,31 @@ class ImageParser:
                         voltorbs_roi, total_roi = split
                         voltorbs_norm = self._prepare_template_image(voltorbs_roi)
                         total_norm = self._prepare_template_image(total_roi)
-                        if voltorbs_norm is not None:
-                            self._template_bank["bottom"].setdefault(label[0], []).append(voltorbs_norm)
-                        if total_norm is not None:
-                            self._template_bank["top"].setdefault(label[1], []).append(total_norm)
+                        for ax in ([axis] if axis else ["row", "col"]):
+                            if voltorbs_norm is not None:
+                                self._template_bank[f"{ax}_bottom"].setdefault(label[0], []).append(voltorbs_norm)
+                            if total_norm is not None:
+                                self._template_bank[f"{ax}_top"].setdefault(label[1], []).append(total_norm)
             except Exception:
                 pass
 
         # Also load manually curated templates from assets/templates and assets/templates/raw.
+        # Naming conventions:
+        #   clue_row_t_N / clue_col_t_N  — axis-specific total templates
+        #   clue_row_v_N / clue_col_v_N  — axis-specific voltorb templates
+        #   clue_t_N / clue_v_N          — axis-agnostic (loaded into both row and col banks)
         for root_rel in ("assets/templates", "assets/templates/raw"):
             root = project_root / root_rel
             if not root.exists():
                 continue
             for image_path in root.rglob("*.png"):
                 stem = image_path.stem.lower()
-                top_match = re.search(r"clue_t_(\d+)$", stem)
-                bottom_match = re.search(r"clue_v_(\d+)$", stem)
-                if top_match is None and bottom_match is None:
-                    continue
+                # axis-specific patterns
+                top_match = re.search(r"clue_(row|col)_t_(\d+)$", stem)
+                bottom_match = re.search(r"clue_(row|col)_v_(\d+)$", stem)
+                # axis-agnostic fallbacks
+                top_any = re.search(r"(?<!_)clue_t_(\d+)$", stem)
+                bottom_any = re.search(r"(?<!_)clue_v_(\d+)$", stem)
                 image = cv2.imread(str(image_path))
                 if image is None:
                     continue
@@ -190,24 +203,46 @@ class ImageParser:
                 if normalized is None:
                     continue
                 if top_match is not None:
-                    value = int(top_match.group(1))
-                    self._template_bank["top"].setdefault(value, []).append(normalized)
+                    axis_key, value = top_match.group(1), int(top_match.group(2))
+                    self._template_bank[f"{axis_key}_top"].setdefault(value, []).append(normalized)
+                elif top_any is not None:
+                    value = int(top_any.group(1))
+                    for ax in ("row", "col"):
+                        self._template_bank[f"{ax}_top"].setdefault(value, []).append(normalized)
                 if bottom_match is not None:
-                    value = int(bottom_match.group(1))
-                    self._template_bank["bottom"].setdefault(value, []).append(normalized)
+                    axis_key, value = bottom_match.group(1), int(bottom_match.group(2))
+                    self._template_bank[f"{axis_key}_bottom"].setdefault(value, []).append(normalized)
+                elif bottom_any is not None:
+                    value = int(bottom_any.group(1))
+                    for ax in ("row", "col"):
+                        self._template_bank[f"{ax}_bottom"].setdefault(value, []).append(normalized)
 
         self._templates_loaded = True
+
+    @staticmethod
+    def _axis_from_region_name(region_name: str) -> str | None:
+        """Return 'row', 'col', or None (unknown) from a region label like 'r0' / 'c3'."""
+        if len(region_name) >= 2 and region_name[0] == "r" and region_name[1:].isdigit():
+            return "row"
+        if len(region_name) >= 2 and region_name[0] == "c" and region_name[1:].isdigit():
+            return "col"
+        return None
 
     def _match_number_template(
         self,
         roi: np.ndarray,
         *,
         kind: str,
+        axis: str = "row",
         min_value: int,
         max_value: int,
         save_if_unmatched: bool,
         source_tag: str,
     ) -> tuple[int | None, float]:
+        """`kind` is 'top' (total) or 'bottom' (voltorbs).
+        `axis` is 'row' or 'col'. Templates from the matching axis-specific bank
+        are tried first; the other axis bank is also checked so shared templates
+        still contribute."""
         if cv2 is None or roi.size == 0:
             return None, -1.0
 
@@ -215,39 +250,51 @@ class ImageParser:
         bw = self._binarize(roi)
         if bw is None:
             if save_if_unmatched:
-                self._save_unmatched_template_sample(roi, kind=kind, source_tag=source_tag)
+                self._save_unmatched_template_sample(roi, kind=kind, axis=axis, source_tag=source_tag)
             return None, -1.0
+
+        # Search axis-specific bank, then the other axis, deduplicating template objects.
+        other_axis = "col" if axis == "row" else "row"
+        primary_bank = self._template_bank.get(f"{axis}_{kind}", {})
+        fallback_bank = self._template_bank.get(f"{other_axis}_{kind}", {})
 
         best_value: int | None = None
         best_score = -1.0
-        for value, templates in self._template_bank.get(kind, {}).items():
-            if not (min_value <= value <= max_value):
-                continue
-            for template in templates:
-                if template.shape[0] > bw.shape[0] or template.shape[1] > bw.shape[1]:
+        seen_templates: set[int] = set()
+
+        for bank in (primary_bank, fallback_bank):
+            for value, templates in bank.items():
+                if not (min_value <= value <= max_value):
                     continue
-                result = cv2.matchTemplate(bw, template, cv2.TM_CCOEFF_NORMED)
-                _, max_val, _, _ = cv2.minMaxLoc(result)
-                score = float(max_val)
-                if score > best_score:
-                    best_score = score
-                    best_value = value
+                for template in templates:
+                    tid = id(template)
+                    if tid in seen_templates:
+                        continue
+                    seen_templates.add(tid)
+                    if template.shape[0] > bw.shape[0] or template.shape[1] > bw.shape[1]:
+                        continue
+                    result = cv2.matchTemplate(bw, template, cv2.TM_CCOEFF_NORMED)
+                    _, max_val, _, _ = cv2.minMaxLoc(result)
+                    score = float(max_val)
+                    if score > best_score:
+                        best_score = score
+                        best_value = value
 
         if best_value is not None and best_score >= self._TEMPLATE_MIN_SCORE:
             return best_value, best_score
 
         if save_if_unmatched:
-            self._save_unmatched_template_sample(roi, kind=kind, source_tag=source_tag)
+            self._save_unmatched_template_sample(roi, kind=kind, axis=axis, source_tag=source_tag)
         return None, best_score
 
-    def _save_unmatched_template_sample(self, roi: np.ndarray, *, kind: str, source_tag: str) -> None:
+    def _save_unmatched_template_sample(self, roi: np.ndarray, *, kind: str, axis: str, source_tag: str) -> None:
         if cv2 is None or roi.size == 0:
             return
 
         normalized = self._prepare_template_image(roi)
         hash_source = normalized if normalized is not None else roi
         digest = hashlib.sha1(hash_source.tobytes()).hexdigest()[:12]
-        key = f"{kind}:{digest}"
+        key = f"{axis}_{kind}:{digest}"
         if key in self._unmatched_saved_hashes:
             return
         self._unmatched_saved_hashes.add(key)
@@ -255,16 +302,16 @@ class ImageParser:
         out_dir = self._project_root() / "assets/templates/raw/clue_unknown"
         out_dir.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        file_name = f"{stamp}_{kind}_{digest}.png"
+        file_name = f"{stamp}_{axis}_{kind}_{digest}.png"
         out_path = out_dir / file_name
         cv2.imwrite(str(out_path), roi)
 
         manifest_path = out_dir / "manifest.csv"
         if not manifest_path.exists():
-            manifest_path.write_text("timestamp,kind,path,source\n", encoding="utf-8")
+            manifest_path.write_text("timestamp,kind,axis,path,source\n", encoding="utf-8")
         with manifest_path.open("a", encoding="utf-8") as fh:
             rel = out_path.relative_to(self._project_root())
-            fh.write(f"{stamp},{kind},{rel.as_posix()},{source_tag}\n")
+            fh.write(f"{stamp},{kind},{axis},{rel.as_posix()},{source_tag}\n")
 
     # --- Tile state classification ---
 
@@ -661,12 +708,13 @@ class ImageParser:
         clue_box: tuple[int, int, int, int],
         *,
         fast: bool = True,
+        axis: str = "row",
     ) -> tuple[int, int] | None:
         crop = self.extract_clue_crop(image_path, clue_box)
         if crop is None:
             return None
 
-        return self.parse_clue_box(crop, fast=fast)
+        return self.parse_clue_box(crop, fast=fast, axis=axis)
 
     def debug_parse_clue_from_screenshot(
         self,
@@ -676,6 +724,7 @@ class ImageParser:
         output_root: str | Path,
         region_name: str = "clue",
         run_id: str | None = None,
+        axis: str = "row",
     ) -> ClueDebugArtifacts | None:
         if cv2 is None:
             return None
@@ -684,11 +733,6 @@ class ImageParser:
         if crop is None:
             return None
 
-        split = self.split_clue_fields(crop)
-        if split is None:
-            return None
-
-        voltorbs_roi, total_roi = split
         ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         output_root_path = Path(output_root)
 
@@ -700,11 +744,41 @@ class ImageParser:
             run_dir = output_root_path / f"{region_name}_{ts}"
         run_dir.mkdir(parents=True, exist_ok=True)
 
+        raw_crop_path = run_dir / "raw_crop.png"
+        log_path = run_dir / "debug.log"
+        cv2.imwrite(str(raw_crop_path), crop)
+
+        x, y, w, h = clue_box
+        split = self.split_clue_fields(crop)
+        if split is None:
+            log_lines = [
+                f"source={image_path}",
+                f"run_id={run_id}",
+                f"region={region_name}",
+                f"clue_box=({x},{y},{w},{h})",
+                "split_failed=True",
+            ]
+            log_path.write_text("\n".join(log_lines) + "\n", encoding="utf-8")
+            return ClueDebugArtifacts(
+                raw_crop_path=raw_crop_path,
+                raw_voltorbs_path=None,
+                raw_total_path=None,
+                normalized_voltorbs_path=None,
+                normalized_total_path=None,
+                log_path=log_path,
+                voltorbs_text="split_failed",
+                total_text="split_failed",
+                voltorbs_value=None,
+                total_value=None,
+                voltorbs_score=-1.0,
+                total_score=-1.0,
+            )
+
+        voltorbs_roi, total_roi = split
         raw_voltorbs_path = run_dir / "raw_voltorbs.png"
         raw_total_path = run_dir / "raw_total.png"
         normalized_voltorbs_path = run_dir / "normalized_voltorbs.png"
         normalized_total_path = run_dir / "normalized_total.png"
-        log_path = run_dir / "debug.log"
 
         cv2.imwrite(str(raw_voltorbs_path), voltorbs_roi)
         cv2.imwrite(str(raw_total_path), total_roi)
@@ -712,6 +786,7 @@ class ImageParser:
         voltorbs_value, voltorbs_score = self._match_number_template(
             voltorbs_roi,
             kind="bottom",
+            axis=axis,
             min_value=0,
             max_value=5,
             save_if_unmatched=True,
@@ -720,6 +795,7 @@ class ImageParser:
         total_value, total_score = self._match_number_template(
             total_roi,
             kind="top",
+            axis=axis,
             min_value=0,
             max_value=15,
             save_if_unmatched=True,
@@ -744,11 +820,11 @@ class ImageParser:
             else f"no_match score={total_score:.3f}"
         )
 
-        x, y, w, h = clue_box
         log_lines = [
             f"source={image_path}",
             f"run_id={run_id}",
             f"region={region_name}",
+            f"axis={axis}",
             f"clue_box=({x},{y},{w},{h})",
             f"voltorbs_text={voltorbs_text!r}",
             f"total_text={total_text!r}",
@@ -760,6 +836,7 @@ class ImageParser:
         log_path.write_text("\n".join(log_lines) + "\n", encoding="utf-8")
 
         return ClueDebugArtifacts(
+            raw_crop_path=raw_crop_path,
             raw_voltorbs_path=raw_voltorbs_path,
             raw_total_path=raw_total_path,
             normalized_voltorbs_path=normalized_voltorbs_path,
@@ -773,9 +850,9 @@ class ImageParser:
             total_score=total_score,
         )
 
-    def parse_clue_box(self, image: str | np.ndarray, *, fast: bool = True) -> tuple[int, int] | None:
+    def parse_clue_box(self, image: str | np.ndarray, *, fast: bool = True, axis: str = "row") -> tuple[int, int] | None:
         debug_lines: list[str] = [
-            f"parse_clue_box fast={fast}",
+            f"parse_clue_box fast={fast} axis={axis}",
         ]
         cv_img = self._to_cv_image(image)
         if cv_img is None or cv2 is None:
@@ -784,7 +861,7 @@ class ImageParser:
             return None
 
         img_h, img_w = cv_img.shape[:2]
-        debug_lines[0] = f"parse_clue_box fast={fast} shape={img_w}x{img_h}"
+        debug_lines[0] = f"parse_clue_box fast={fast} axis={axis} shape={img_w}x{img_h}"
         debug_lines.append(f"backend_order={self._clue_ocr_backend_order()}")
 
         split = self.split_clue_fields(cv_img)
@@ -800,6 +877,7 @@ class ImageParser:
             max_value=5,
             fast=fast,
             field_name="voltorbs",
+            axis=axis,
             debug_lines=debug_lines,
         )
         total = self._ocr_number_field(
@@ -808,6 +886,7 @@ class ImageParser:
             max_value=15,
             fast=fast,
             field_name="total",
+            axis=axis,
             debug_lines=debug_lines,
         )
 
@@ -855,6 +934,7 @@ class ImageParser:
         max_value: int,
         fast: bool,
         field_name: str,
+        axis: str = "row",
         debug_lines: list[str] | None = None,
     ) -> int | None:
         if cv2 is None or roi.size == 0:
@@ -866,6 +946,7 @@ class ImageParser:
         value, score = self._match_number_template(
             roi,
             kind=kind,
+            axis=axis,
             min_value=min_value,
             max_value=max_value,
             save_if_unmatched=True,
@@ -874,9 +955,9 @@ class ImageParser:
 
         if debug_lines is not None:
             if value is None:
-                debug_lines.append(f"field={field_name} template_result=None score={score:.3f}")
+                debug_lines.append(f"field={field_name} axis={axis} template_result=None score={score:.3f}")
             else:
-                debug_lines.append(f"field={field_name} template_winner={value} score={score:.3f}")
+                debug_lines.append(f"field={field_name} axis={axis} template_winner={value} score={score:.3f}")
         return value
 
     def _crop_by_bounds(
@@ -944,8 +1025,8 @@ class ImageParser:
         left, top, step, tile_size = board_box
         row_rects, col_rects = self._build_clue_rects(cv_img.shape[1], cv_img.shape[0], left, top, step, tile_size)
 
-        row_pairs = self._parse_clue_rects(cv_img, row_rects)
-        col_pairs = self._parse_clue_rects(cv_img, col_rects)
+        row_pairs = self._parse_clue_rects(cv_img, row_rects, axis="row")
+        col_pairs = self._parse_clue_rects(cv_img, col_rects, axis="col")
         return row_pairs, col_pairs
 
     def _fallback_board_box(self, image_w: int, image_h: int) -> tuple[int, int, int, int]:
@@ -1091,6 +1172,7 @@ class ImageParser:
         self,
         cv_img: np.ndarray,
         rects: list[tuple[int, int, int, int]],
+        axis: str = "row",
         sample_offsets: list[tuple[int, int]] | None = None,
         fast_ocr: bool = False,
         debug_lines: list[str] | None = None,
@@ -1128,6 +1210,7 @@ class ImageParser:
                 total, total_score = self._match_number_template(
                     top_roi,
                     kind="top",
+                    axis=axis,
                     min_value=0,
                     max_value=15,
                     save_if_unmatched=True,
@@ -1136,6 +1219,7 @@ class ImageParser:
                 voltorbs, voltorbs_score = self._match_number_template(
                     bottom_roi,
                     kind="bottom",
+                    axis=axis,
                     min_value=0,
                     max_value=5,
                     save_if_unmatched=True,

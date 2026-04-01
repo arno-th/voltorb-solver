@@ -956,6 +956,7 @@ class OverlayControlWindow(QMainWindow):
         parsed_count = 0
         failed: list[str] = []
         for region in clue_regions:
+            axis = "col" if region.name.startswith("c") else "row"
             if debug:
                 artifacts = self.clue_parser.debug_parse_clue_from_screenshot(
                     self.state.last_input_path,
@@ -963,6 +964,7 @@ class OverlayControlWindow(QMainWindow):
                     output_root=self._clue_dataset_root / "debug_parse",
                     region_name=region.name,
                     run_id=debug_run_id,
+                    axis=axis,
                 )
                 pair = (
                     (artifacts.voltorbs_value, artifacts.total_value)
@@ -976,6 +978,7 @@ class OverlayControlWindow(QMainWindow):
                     self.state.last_input_path,
                     (region.x, region.y, region.w, region.h),
                     fast=not region.name.startswith("c"),
+                    axis=axis,
                 )
             if pair is not None:
                 self._clue_parsed_values[region.name] = pair
