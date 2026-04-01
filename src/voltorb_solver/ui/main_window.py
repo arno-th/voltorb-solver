@@ -248,7 +248,12 @@ class MainWindow(QMainWindow):
 
     def _render_all(self) -> None:
         result = self.service.current
-        self.board_widget.render(self.service.state, result.snapshot, self._selected_tile)
+        recommended = (
+            (result.safest_moves[0].row, result.safest_moves[0].col)
+            if result.safest_moves
+            else None
+        )
+        self.board_widget.render(self.service.state, result.snapshot, self._selected_tile, recommended)
         self.solver_panel.render(result.snapshot, result.safest_moves, result.best_ev_moves)
         self._sync_clue_widgets()
         self._refresh_selection_ui()

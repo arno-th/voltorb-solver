@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
 from voltorb_solver.game_state import GameState
 from voltorb_solver.image_import.parser import ImageParser, TileDebugArtifacts
 from voltorb_solver.image_import.screen_parser import Region, ScreenBoardParser
+from voltorb_solver.solver import solve_game_state
 
 
 @dataclass(slots=True)
@@ -94,6 +95,22 @@ def _map_region_rect(region: Region, mapping_rect: QRect, image_w: int, image_h:
     return QRect(x, y, max(1, w), max(1, h))
 
 
+def _prob_to_rgb(p: float) -> tuple[int, int, int]:
+    """Interpolate green→yellow→red for voltorb probability 0→1."""
+    p = max(0.0, min(1.0, p))
+    if p <= 0.5:
+        t = p * 2
+        r = int(22 + 212 * t)
+        g = int(163 + 16 * t)
+        b = int(74 - 66 * t)
+    else:
+        t = (p - 0.5) * 2
+        r = int(234 - 14 * t)
+        g = int(179 - 141 * t)
+        b = int(8 + 30 * t)
+    return r, g, b
+
+
 class OverlayBorderWindow(QWidget):
     def __init__(self, color: QColor, thickness: int = 3) -> None:
         super().__init__()
@@ -145,6 +162,112 @@ class OverlayLabelWindow(QWidget):
         )
         label.adjustSize()
         self.resize(label.size())
+
+
+class ProbabilityLabelWindow(QWidget):
+    """Frameless always-on-top window overlaying a single tile with its voltorb probability."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.Tool
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.X11BypassWindowManagerHint
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self._label = QLabel("", self)
+        self._label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+    def update_content(self, text: str, r: int, g: int, b: int) -> None:
+        self._label.setText(text)
+        self._label.setStyleSheet(
+            f"color: white; font-weight: 700; font-size: 15px;"
+            f" background-color: rgba({r},{g},{b},210);"
+            f" border-radius: 6px;"
+        )
+
+    def place_at(self, rect: QRect, screen=None) -> None:
+        _bind_widget_to_screen(self, screen)
+        self.setGeometry(rect)
+        self._label.setGeometry(0, 0, rect.width(), rect.height())
+
+
+class SimpleProbabilityOverlay:
+    """Renders voltorb probability percentages on top of each unrevealed tile."""
+
+    def __init__(self) -> None:
+        self._windows: list[ProbabilityLabelWindow] = []
+        self._visible = False
+        self._target_screen = QGuiApplication.primaryScreen()
+        self._tile_data: list[tuple[tuple[int, int, int, int], float, bool]] = []
+        self._image_size: tuple[int, int] | None = None
+        self._mapping_rect: QRect | None = None
+
+    def set_target_screen(self, screen) -> None:
+        self._target_screen = screen
+        if self._visible:
+            self._render()
+
+    def set_data(
+        self,
+        tile_data: list[tuple[tuple[int, int, int, int], float, bool]],
+        image_w: int,
+        image_h: int,
+        mapping_rect: QRect | None,
+    ) -> None:
+        """Update tile data: list of (region_xywh, bomb_probability, is_recommended)."""
+        self._tile_data = list(tile_data)
+        self._image_size = (image_w, image_h)
+        self._mapping_rect = QRect(mapping_rect) if mapping_rect is not None else None
+        if self._visible:
+            self._render()
+
+    def clear(self) -> None:
+        self._tile_data = []
+        self._image_size = None
+        self._mapping_rect = None
+        self._hide_all()
+
+    def show(self) -> None:
+        self._visible = True
+        self._render()
+
+    def hide(self) -> None:
+        self._visible = False
+        self._hide_all()
+
+    def _hide_all(self) -> None:
+        for w in self._windows:
+            w.hide()
+            w.deleteLater()
+        self._windows.clear()
+
+    def _render(self) -> None:
+        self._hide_all()
+        if not self._tile_data or self._image_size is None:
+            return
+        screen = self._target_screen
+        if screen is None:
+            return
+        image_w, image_h = self._image_size
+        if self._mapping_rect is not None:
+            mapping = QRect(self._mapping_rect)
+        else:
+            geo = screen.geometry()
+            mapping = _map_image_to_overlay(geo.width(), geo.height(), image_w, image_h)
+            mapping.translate(geo.x(), geo.y())
+
+        for xywh, prob, is_recommended in self._tile_data:
+            region = Region("_", *xywh)
+            rect = _map_region_rect(region, mapping, image_w, image_h)
+            rc, gc, bc = _prob_to_rgb(prob)
+            star = "★" if is_recommended else ""
+            win = ProbabilityLabelWindow()
+            win.update_content(f"{star}{prob:.0%}", rc, gc, bc)
+            win.place_at(rect, screen)
+            win.show()
+            self._windows.append(win)
 
 
 class X11SafeOverlay:
@@ -245,6 +368,7 @@ class OverlayControlWindow(QMainWindow):
         self.clue_parser = ImageParser()
         self.state = OverlayState()
         self.x11_overlay = X11SafeOverlay(OVERLAY_COLORS)
+        self.simple_overlay = SimpleProbabilityOverlay()
         self._screens = QGuiApplication.screens()
         self._cached_regions: list[Region] = []
         self._last_capture_signature: tuple[str, int | None, int, int, int, int] | None = None
@@ -359,11 +483,19 @@ class OverlayControlWindow(QMainWindow):
         actions_layout.addLayout(options_row)
         actions_layout.addLayout(button_row)
 
-        self.overlay_btn = QPushButton("Enable Overlay")
+        self.overlay_btn = QPushButton("Enable Debug Overlay")
         self.overlay_btn.setObjectName("AccentToggle")
         self.overlay_btn.setCheckable(True)
         self.overlay_btn.toggled.connect(self.toggle_overlay)
-        actions_layout.addWidget(self.overlay_btn)
+        self.prob_overlay_btn = QPushButton("Enable Prob Overlay")
+        self.prob_overlay_btn.setObjectName("ProbToggle")
+        self.prob_overlay_btn.setCheckable(True)
+        self.prob_overlay_btn.toggled.connect(self.toggle_prob_overlay)
+        overlay_btns_row = QHBoxLayout()
+        overlay_btns_row.setSpacing(8)
+        overlay_btns_row.addWidget(self.overlay_btn)
+        overlay_btns_row.addWidget(self.prob_overlay_btn)
+        actions_layout.addLayout(overlay_btns_row)
         layout.addWidget(actions_card)
 
         help_text = QLabel(
@@ -486,6 +618,18 @@ class OverlayControlWindow(QMainWindow):
 
             QPushButton#AccentToggle:checked {
                 background: #14533f;
+            }
+
+            QPushButton#ProbToggle {
+                background: #7c3aed;
+            }
+
+            QPushButton#ProbToggle:hover {
+                background: #6d28d9;
+            }
+
+            QPushButton#ProbToggle:checked {
+                background: #5b21b6;
             }
             """
         )
@@ -686,6 +830,7 @@ class OverlayControlWindow(QMainWindow):
 
     def clear_overlay(self) -> None:
         self.x11_overlay.clear_overlay()
+        self.simple_overlay.clear()
         self.state.last_input_path = None
         self._cached_regions = []
         self._last_capture_signature = None
@@ -697,11 +842,27 @@ class OverlayControlWindow(QMainWindow):
         self._set_status("Overlay cleared.", level="info")
 
     def toggle_overlay(self, checked: bool) -> None:
-        self.overlay_btn.setText("Disable Overlay" if checked else "Enable Overlay")
+        self.overlay_btn.setText("Disable Debug Overlay" if checked else "Enable Debug Overlay")
         if checked:
             self._show_active_overlay()
         else:
-            self._hide_all_overlays()
+            self.x11_overlay.hide()
+
+    def toggle_prob_overlay(self, checked: bool) -> None:
+        self.prob_overlay_btn.setText("Disable Prob Overlay" if checked else "Enable Prob Overlay")
+        if checked:
+            screen = self._get_selected_screen()
+            if screen is None:
+                self._show_error("No monitor selected for overlay.")
+                self.prob_overlay_btn.blockSignals(True)
+                self.prob_overlay_btn.setChecked(False)
+                self.prob_overlay_btn.setText("Enable Prob Overlay")
+                self.prob_overlay_btn.blockSignals(False)
+                return
+            self.simple_overlay.set_target_screen(screen)
+            self.simple_overlay.show()
+        else:
+            self.simple_overlay.hide()
 
     def _show_active_overlay(self) -> None:
         screen = self._get_selected_screen()
@@ -746,6 +907,7 @@ class OverlayControlWindow(QMainWindow):
 
         self.state.selected_screen_index = selected
         self.x11_overlay.set_target_screen(self._screens[selected])
+        self.simple_overlay.set_target_screen(self._screens[selected])
         self._update_monitor_hint()
         self._update_window_hint()
 
@@ -760,6 +922,7 @@ class OverlayControlWindow(QMainWindow):
         screen = self._get_selected_screen()
         if screen is not None:
             self.x11_overlay.set_target_screen(screen)
+            self.simple_overlay.set_target_screen(screen)
         self._update_monitor_hint()
 
         if self.overlay_btn.isChecked():
@@ -986,6 +1149,8 @@ class OverlayControlWindow(QMainWindow):
             else:
                 failed.append(region.name)
         self._apply_clue_label_updates()
+        self._push_clues_to_game_state()
+        self._recompute_probability_overlay()
         if failed:
             self._set_status(
                 f"Parsed {parsed_count}/{len(clue_regions)} clues. Failed: {', '.join(failed)}.",
@@ -1035,6 +1200,7 @@ class OverlayControlWindow(QMainWindow):
                     self._game_state.set_tile_revealed(r_idx, c_idx, value)
 
         self._apply_tile_label_updates()
+        self._recompute_probability_overlay()
 
         n_revealed = sum(1 for v in self._tile_parsed_values.values() if v is not None)
         n_total = len(tile_regions)
@@ -1069,6 +1235,61 @@ class OverlayControlWindow(QMainWindow):
                 f"Classified all {n_revealed} tiles. Overlay labels updated.",
                 level="success",
             )
+
+    def _push_clues_to_game_state(self) -> None:
+        for name, (voltorbs, total) in self._clue_parsed_values.items():
+            idx = int(name[1:])
+            try:
+                if name[0] == "r":
+                    self._game_state.set_row_clue(idx, voltorbs, total)
+                else:
+                    self._game_state.set_col_clue(idx, voltorbs, total)
+            except (ValueError, IndexError):
+                pass
+
+    def _recompute_probability_overlay(self) -> None:
+        if self._last_image_size is None:
+            return
+        tile_regions = [r for r in self._last_parse_regions if self._is_tile_region(r.name)]
+        if not tile_regions:
+            return
+
+        snapshot = solve_game_state(self._game_state)
+        if snapshot.total_configurations == 0:
+            return
+
+        unrevealed: list[Region] = []
+        for region in tile_regions:
+            m = re.match(r"^\((\d),(\d)\)$", region.name)
+            if not m:
+                continue
+            r_idx, c_idx = int(m.group(1)), int(m.group(2))
+            if not self._game_state.board[r_idx][c_idx].revealed:
+                unrevealed.append(region)
+
+        if not unrevealed:
+            self.simple_overlay.clear()
+            return
+
+        recommended_name: str | None = None
+        min_prob = float("inf")
+        for region in unrevealed:
+            m = re.match(r"^\((\d),(\d)\)$", region.name)
+            assert m
+            prob = snapshot.bomb_probabilities.get((int(m.group(1)), int(m.group(2))), 1.0)
+            if prob < min_prob:
+                min_prob = prob
+                recommended_name = region.name
+
+        data: list[tuple[tuple[int, int, int, int], float, bool]] = []
+        for region in unrevealed:
+            m = re.match(r"^\((\d),(\d)\)$", region.name)
+            assert m
+            prob = snapshot.bomb_probabilities.get((int(m.group(1)), int(m.group(2))), 1.0)
+            data.append(((region.x, region.y, region.w, region.h), prob, region.name == recommended_name))
+
+        mapping_rect = self._mapping_rect_for_signature(self._last_capture_signature)
+        self.simple_overlay.set_data(data, *self._last_image_size, mapping_rect)
 
     def _show_error(self, message: str) -> None:
         self._set_status(message, level="error")

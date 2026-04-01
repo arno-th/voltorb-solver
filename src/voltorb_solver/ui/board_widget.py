@@ -48,11 +48,28 @@ class BoardWidget(QWidget):
             for btn in row:
                 btn.setFixedSize(side, side)
 
+@staticmethod
+    def _bomb_prob_color(p: float) -> str:
+        """Interpolate green→yellow→red based on voltorb probability."""
+        # Stop 0: #86efac (green-300), stop 0.5: #fde68a (amber-200), stop 1: #fca5a5 (red-300)
+        if p <= 0.5:
+            t = p * 2
+            r = int(134 + 119 * t)
+            g = int(239 - 9 * t)
+            b = int(172 - 34 * t)
+        else:
+            t = (p - 0.5) * 2
+            r = int(253 - t)
+            g = int(230 - 65 * t)
+            b = int(138 + 27 * t)
+        return f"#{r:02x}{g:02x}{b:02x}"
+
     def render(
         self,
         state: GameState,
         snapshot: SolverSnapshot,
         selected: tuple[int, int] | None = None,
+        recommended: tuple[int, int] | None = None,
     ) -> None:
         self._selected = selected
         for r in range(BOARD_SIZE):
@@ -60,7 +77,13 @@ class BoardWidget(QWidget):
                 btn = self._buttons[r][c]
                 tile = state.board[r][c]
                 is_selected = self._selected == (r, c)
-                border = "3px solid #0ea5a0" if is_selected else "1px solid #b6ccdf"
+                is_recommended = recommended == (r, c) and not is_selected
+                if is_selected:
+                    border = "3px solid #0ea5a0"
+                elif is_recommended:
+                    border = "3px solid #22c55e"
+                else:
+                    border = "1px solid #b6ccdf"
                 if tile.revealed and tile.value is not None:
                     btn.setText(str(tile.value))
                     if tile.value == 0:
@@ -75,8 +98,10 @@ class BoardWidget(QWidget):
                         )
                 else:
                     bomb_p = snapshot.bomb_probabilities.get((r, c), 0.0)
-                    btn.setText(f"?\nB:{bomb_p:.0%}")
+                    bg = self._bomb_prob_color(bomb_p)
+                    label = "★" if is_recommended else "?"
+                    btn.setText(f"{label}\nB:{bomb_p:.0%}")
                     btn.setStyleSheet(
-                        f"background-color: #f8fcff; color: #1f3a5f; font-weight: 600;"
+                        f"background-color: {bg}; color: #1f3a5f; font-weight: 600;"
                         f" border: {border}; border-radius: 12px;"
                     )
