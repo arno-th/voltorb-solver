@@ -9,7 +9,7 @@ import subprocess
 from tempfile import gettempdir
 
 from PySide6.QtCore import Qt, QRect
-from PySide6.QtGui import QColor, QGuiApplication
+from PySide6.QtGui import QColor, QGuiApplication, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -28,6 +28,11 @@ from voltorb_solver.game_state import GameState
 from voltorb_solver.image_import.parser import ImageParser, TileDebugArtifacts
 from voltorb_solver.image_import.screen_parser import Region, ScreenBoardParser
 from voltorb_solver.solver import solve_game_state
+
+try:
+    import cv2 as _cv2  # type: ignore
+except Exception:
+    _cv2 = None
 
 
 @dataclass(slots=True)
@@ -552,6 +557,26 @@ class OverlayControlWindow(QMainWindow):
         overlay_btns_row.addWidget(self.prob_overlay_btn)
         debug_content_layout.addLayout(overlay_btns_row)
 
+        # ── Capture region crop ──────────────────────────────────────────────
+        crop_label = QLabel("Capture Region Crop")
+        crop_label.setObjectName("FieldLabel")
+        debug_content_layout.addWidget(crop_label)
+
+        crop_row = QHBoxLayout()
+        crop_row.setSpacing(8)
+        self.region_picker_combo = QComboBox()
+        self.region_picker_combo.setObjectName("MonitorCombo")
+        self.region_picker_combo.currentIndexChanged.connect(self._on_region_picker_changed)
+        self.subsection_combo = QComboBox()
+        self.subsection_combo.setObjectName("MonitorCombo")
+        self.capture_region_btn = QPushButton("Capture")
+        self.capture_region_btn.setObjectName("PrimaryButton")
+        self.capture_region_btn.clicked.connect(self._capture_region_crop)
+        crop_row.addWidget(self.region_picker_combo, 2)
+        crop_row.addWidget(self.subsection_combo, 1)
+        crop_row.addWidget(self.capture_region_btn)
+        debug_content_layout.addLayout(crop_row)
+
         self.debug_content.setVisible(False)
         debug_card_layout.addWidget(self.debug_content)
         layout.addWidget(debug_card)
@@ -690,6 +715,107 @@ class OverlayControlWindow(QMainWindow):
         visible = self.debug_content.isVisible()
         self.debug_content.setVisible(not visible)
         self.debug_toggle_btn.setText("\u25bc Hide" if not visible else "\u25b6 Show")
+
+    def _update_region_picker(self) -> None:
+        """Repopulate the region picker combo from the current parsed regions."""
+        self.region_picker_combo.blockSignals(True)
+        prev_text = self.region_picker_combo.currentText()
+        self.region_picker_combo.clear()
+        for region in self._last_parse_regions:
+            self.region_picker_combo.addItem(region.name)
+        # Restore previous selection if still present.
+        idx = self.region_picker_combo.findText(prev_text)
+        self.region_picker_combo.setCurrentIndex(max(0, idx))
+        self.region_picker_combo.blockSignals(False)
+        self._on_region_picker_changed(self.region_picker_combo.currentIndex())
+
+    def _on_region_picker_changed(self, _index: int) -> None:
+        name = self.region_picker_combo.currentText()
+        self.subsection_combo.blockSignals(True)
+        self.subsection_combo.clear()
+        if self._is_clue_region(name):
+            self.subsection_combo.addItems(["full", "total", "voltorbs"])
+        else:
+            self.subsection_combo.addItem("full")
+        self.subsection_combo.blockSignals(False)
+
+    def _capture_region_crop(self) -> None:
+        if not self._last_parse_regions:
+            self._show_error("No regions parsed yet. Run 'Start Game' or 'Label/relabel game' first.")
+            return
+        if _cv2 is None:
+            self._show_error("OpenCV (cv2) is required for region crop capture.")
+            return
+
+        region_name = self.region_picker_combo.currentText()
+        subsection = self.subsection_combo.currentText()
+        region = next((r for r in self._last_parse_regions if r.name == region_name), None)
+        if region is None:
+            self._show_error(f"Region '{region_name}' not found in parsed regions.")
+            return
+
+        # Take a fresh screenshot.
+        if self.state.target_window_id is not None:
+            pixmap = self._capture_window(self.state.target_window_id)
+        else:
+            screen = self._get_selected_screen()
+            if screen is None:
+                self._show_error("No monitor selected for capture.")
+                return
+            pixmap = screen.grabWindow(0)
+
+        if pixmap is None or pixmap.isNull():
+            self._show_error("Failed to capture screenshot for region crop.")
+            return
+
+        # Save to a temp file and reload via cv2.
+        tmp_path = str(
+            Path(gettempdir())
+            / f"voltorb_region_capture_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.png"
+        )
+        if not pixmap.save(tmp_path):
+            self._show_error("Failed to save temporary screenshot.")
+            return
+
+        image = _cv2.imread(tmp_path)
+        if image is None:
+            self._show_error("Failed to read temporary screenshot.")
+            return
+
+        # Determine crop box.
+        if subsection == "total":
+            x, y, w, h = self._subregion_from_bounds(region, self.clue_parser._TOTAL_OCR_BOUNDS)
+        elif subsection == "voltorbs":
+            x, y, w, h = self._subregion_from_bounds(region, self.clue_parser._VOLTORB_OCR_BOUNDS)
+        else:
+            x, y, w, h = region.x, region.y, region.w, region.h
+
+        img_h, img_w = image.shape[:2]
+        x0 = max(0, min(x, img_w - 1))
+        y0 = max(0, min(y, img_h - 1))
+        x1 = max(x0 + 1, min(x + w, img_w))
+        y1 = max(y0 + 1, min(y + h, img_h))
+        crop = image[y0:y1, x0:x1]
+        if crop.size == 0:
+            self._show_error("Computed crop is empty — region may be off-screen.")
+            return
+
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        safe_name = re.sub(r"[^\w\-]", "_", region_name)
+        if self._is_clue_region(region_name):
+            out_dir = self._clue_dataset_root / "unknown"
+        elif self._is_tile_region(region_name):
+            out_dir = self._tile_dataset_root / "unknown"
+        else:
+            out_dir = Path(gettempdir())
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / f"{stamp}_{safe_name}_{subsection}.png"
+        _cv2.imwrite(str(out_path), crop)
+
+        self._set_status(
+            f"Saved {region_name} ({subsection}) crop → {out_path.name}",
+            level="success",
+        )
 
     def _start_game(self) -> None:
         if self.state.target_window_id is None:
@@ -944,6 +1070,7 @@ class OverlayControlWindow(QMainWindow):
         self._game_state.reset()
         self._last_image_size = None
         self._last_parse_regions = []
+        self._update_region_picker()
         self._set_status("Overlay cleared.", level="info")
 
     def toggle_overlay(self, checked: bool) -> None:
@@ -1117,6 +1244,7 @@ class OverlayControlWindow(QMainWindow):
         self._last_capture_signature = capture_signature
         self.x11_overlay.set_mapping_rect(self._mapping_rect_for_signature(capture_signature))
         self.x11_overlay.set_overlay_data(overlay_regions, result.image_width, result.image_height)
+        self._update_region_picker()
 
         warning_text = ""
         if result.warnings:
