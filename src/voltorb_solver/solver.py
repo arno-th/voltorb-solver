@@ -12,6 +12,7 @@ class SolverSnapshot:
     value_probabilities: dict[tuple[int, int], dict[int, float]]
     bomb_probabilities: dict[tuple[int, int], float]
     impossible_values: dict[tuple[int, int], set[int]]
+    useful_positions: set[tuple[int, int]]  # P(2) > 0 or P(3) > 0
     errors: list[str]
 
 
@@ -26,7 +27,7 @@ def _row_patterns(target_voltorbs: int, target_sum: int) -> list[tuple[int, ...]
 def solve_game_state(state: GameState) -> SolverSnapshot:
     for clue in state.row_clues + state.col_clues:
         if not clue.is_valid():
-            return SolverSnapshot(0, {}, {}, {}, ["Invalid clue values."])
+            return SolverSnapshot(0, {}, {}, {}, set(), ["Invalid clue values."])
 
     revealed = state.revealed_tiles()
     row_options: list[list[tuple[int, ...]]] = []
@@ -44,7 +45,7 @@ def solve_game_state(state: GameState) -> SolverSnapshot:
             if ok:
                 constrained.append(row)
         if not constrained:
-            return SolverSnapshot(0, {}, {}, {}, [f"No valid rows for row {r + 1}."])
+            return SolverSnapshot(0, {}, {}, {}, set(), [f"No valid rows for row {r + 1}."])
         row_options.append(constrained)
 
     counts = {
@@ -124,7 +125,7 @@ def solve_game_state(state: GameState) -> SolverSnapshot:
     backtrack(0)
 
     if total == 0:
-        return SolverSnapshot(0, {}, {}, {}, ["No full-board configurations satisfy the clues."])
+        return SolverSnapshot(0, {}, {}, {}, set(), ["No full-board configurations satisfy the clues."])
 
     value_probabilities: dict[tuple[int, int], dict[int, float]] = {}
     bomb_probabilities: dict[tuple[int, int], float] = {}
@@ -136,10 +137,16 @@ def solve_game_state(state: GameState) -> SolverSnapshot:
         bomb_probabilities[pos] = probs[0]
         impossible_values[pos] = {value for value, p in probs.items() if p == 0.0}
 
+    useful_positions = {
+        pos for pos, probs in value_probabilities.items()
+        if probs[2] > 0.0 or probs[3] > 0.0
+    }
+
     return SolverSnapshot(
         total_configurations=total,
         value_probabilities=value_probabilities,
         bomb_probabilities=bomb_probabilities,
         impossible_values=impossible_values,
+        useful_positions=useful_positions,
         errors=[],
     )

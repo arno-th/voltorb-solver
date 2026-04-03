@@ -12,6 +12,7 @@ class MoveSuggestion:
     col: int
     bomb_probability: float
     expected_value: float
+    is_useful: bool  # P(2) > 0 or P(3) > 0 — worth pressing
 
 
 def _expected_value_for_pos(snapshot: SolverSnapshot, pos: tuple[int, int], bomb_penalty: float) -> float:
@@ -46,15 +47,21 @@ def suggest_moves(
                     col=c,
                     bomb_probability=snapshot.bomb_probabilities[pos],
                     expected_value=_expected_value_for_pos(snapshot, pos, bomb_penalty),
+                    is_useful=pos in snapshot.useful_positions,
                 )
             )
 
+    # Only recommend tiles that can possibly be a 2 or 3 — tiles that are
+    # definitively 0-or-1 have nothing to gain and should be skipped.
+    useful = [c for c in candidates if c.is_useful]
+    pool = useful if useful else candidates  # fall back if somehow none are useful
+
     safest = sorted(
-        candidates,
+        pool,
         key=lambda move: (move.bomb_probability, -move.expected_value, move.row, move.col),
     )[:top_n]
     best_ev = sorted(
-        candidates,
+        pool,
         key=lambda move: (-move.expected_value, move.bomb_probability, move.row, move.col),
     )[:top_n]
 

@@ -56,7 +56,10 @@ class SolverPanel(QWidget):
         safest_moves: list[MoveSuggestion],
         best_ev_moves: list[MoveSuggestion],
     ) -> None:
-        self.status.setText(f"Configurations: {snapshot.total_configurations}")
+        n_useful = len(snapshot.useful_positions)
+        self.status.setText(
+            f"Configurations: {snapshot.total_configurations} | Useful tiles: {n_useful}"
+        )
         self.errors.setText("; ".join(snapshot.errors))
 
         self.safest_list.clear()

@@ -1388,7 +1388,11 @@ class OverlayControlWindow(QMainWindow):
         for region in unrevealed:
             m = re.match(r"^\((\d),(\d)\)$", region.name)
             assert m
-            prob = snapshot.bomb_probabilities.get((int(m.group(1)), int(m.group(2))), 1.0)
+            pos = (int(m.group(1)), int(m.group(2)))
+            # Only star tiles that can still be a 2 or 3 — useless tiles are skipped.
+            if pos not in snapshot.useful_positions:
+                continue
+            prob = snapshot.bomb_probabilities.get(pos, 1.0)
             if prob < min_prob:
                 min_prob = prob
                 recommended_name = region.name
