@@ -472,10 +472,14 @@ class OverlayControlWindow(QMainWindow):
         self.start_game_btn = QPushButton("Start Game")
         self.start_game_btn.setObjectName("PrimaryButton")
         self.start_game_btn.clicked.connect(self._start_game)
+        self.refresh_tiles_btn = QPushButton("Refresh Tiles")
+        self.refresh_tiles_btn.setObjectName("SecondaryButton")
+        self.refresh_tiles_btn.clicked.connect(self._refresh_tiles)
         self.clear_game_btn = QPushButton("Clear Game")
         self.clear_game_btn.setObjectName("DangerButton")
         self.clear_game_btn.clicked.connect(self.clear_overlay)
         runtime_btn_row.addWidget(self.start_game_btn)
+        runtime_btn_row.addWidget(self.refresh_tiles_btn)
         runtime_btn_row.addWidget(self.clear_game_btn)
         runtime_btn_row.addStretch(1)
         runtime_layout.addLayout(runtime_btn_row)
@@ -696,6 +700,44 @@ class OverlayControlWindow(QMainWindow):
         self.parse_tiles()
         if not self.prob_overlay_btn.isChecked():
             self.prob_overlay_btn.setChecked(True)
+
+    def _refresh_tiles(self) -> None:
+        if self.state.last_input_path is None:
+            self._show_error("No labeled game found. Use 'Start Game' first.")
+            return
+        tile_regions = [r for r in self._last_parse_regions if self._is_tile_region(r.name)]
+        if not tile_regions:
+            self._show_error("No tile regions found. Use 'Start Game' to label the board first.")
+            return
+
+        was_prob_overlay_on = self.prob_overlay_btn.isChecked()
+        if was_prob_overlay_on:
+            self.simple_overlay.hide()
+
+        # Capture a fresh screenshot into the existing path so parse_tiles() picks it up.
+        if self.state.target_window_id is not None:
+            pixmap = self._capture_window(self.state.target_window_id)
+        else:
+            screen = self._get_selected_screen()
+            if screen is None:
+                if was_prob_overlay_on:
+                    self.simple_overlay.show()
+                self._show_error("No monitor selected for screen capture.")
+                return
+            pixmap = screen.grabWindow(0)
+
+        if pixmap is None or pixmap.isNull() or not pixmap.save(self.state.last_input_path):
+            if was_prob_overlay_on:
+                self.simple_overlay.show()
+            self._show_error("Failed to capture a fresh screenshot for tile refresh.")
+            return
+
+        self.parse_tiles()
+
+        if was_prob_overlay_on:
+            # parse_tiles already called _recompute_probability_overlay which populated the
+            # overlay data; just re-show the windows.
+            self.simple_overlay.show()
 
     def _set_status(self, message: str, level: str = "info") -> None:
         style_map = {
