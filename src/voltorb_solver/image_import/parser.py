@@ -452,46 +452,50 @@ class ImageParser:
         region_name: str = "",
         image_path: str = "",
     ) -> int | None:
-        """Classify one tile crop.
+        """Classify one tile crop by picking the highest-scoring template across
+        all banks (closed + state values 0-3).
 
         Returns:
-            None  — tile is unopen (best match is the closed template), or no
-                    templates are loaded at all so classification is impossible.
+            None  — closed/face-down tile won, or no templates are loaded.
             0     — voltorb.
             1/2/3 — revealed safe tile with that value.
 
-        When both closed and state templates are present, the highest-scoring
-        match wins (competitive comparison).  This prevents a revealed tile from
-        being silently classified as closed just because it clears the closed
-        threshold.
-
-        If the tile appears open but no state template matches confidently, the
-        crop is saved to ``assets/parser_debug/tile_dataset/unknown/`` for later
-        labeling.
+        Since there are only 5 possible classes, the template with the maximum
+        TM_CCOEFF_NORMED score is always accepted — no minimum thresholds.
         """
         self._load_closed_tile_templates()
         self._load_tile_state_templates()
 
-        has_closed = bool(self._closed_tile_templates)
-        has_state = bool(self._tile_state_bank)
-
-        if not has_closed and not has_state:
+        canonical = self._tile_crop_to_canonical(tile_crop)
+        if canonical is None:
             return None
 
-        _, closed_score = self._is_tile_closed(tile_crop) if has_closed else (False, -1.0)
-        state_value, state_score = self._match_tile_state_template(tile_crop) if has_state else (None, -1.0)
+        best_label: int | None = None   # None = closed
+        best_score = -2.0
+        found_any = False
 
-        # Prefer whichever side scored higher.
-        if has_closed and (not has_state or closed_score >= state_score):
-            if closed_score >= self.TILE_CLOSED_MIN_SCORE:
-                return None  # tile is unopen
+        # Score closed templates (label = None → tile is unopen).
+        for template in self._closed_tile_templates:
+            result = cv2.matchTemplate(canonical, template, cv2.TM_CCOEFF_NORMED)
+            _, max_val, _, _ = cv2.minMaxLoc(result)
+            score = float(max_val)
+            if score > best_score:
+                best_score = score
+                best_label = None
+                found_any = True
 
-        if state_value is not None:
-            return state_value
+        # Score revealed-state templates (label = 0/1/2/3).
+        for value, templates in self._tile_state_bank.items():
+            for template in templates:
+                result = cv2.matchTemplate(canonical, template, cv2.TM_CCOEFF_NORMED)
+                _, max_val, _, _ = cv2.minMaxLoc(result)
+                score = float(max_val)
+                if score > best_score:
+                    best_score = score
+                    best_label = value
+                    found_any = True
 
-        # Tile appears open but no state template matched — save for labeling.
-        self._save_unknown_tile_crop(tile_crop, region_name=region_name, image_path=image_path)
-        return None
+        return best_label if found_any else None
 
     def _save_unknown_tile_crop(
         self,
@@ -611,12 +615,8 @@ class ImageParser:
         if self._tile_state_bank:
             matched_value, state_score = self._match_tile_state_template(crop)
 
-        # Competitive comparison: state wins when its score exceeds the closed score.
-        result: int | None = None
-        if matched_value is not None and state_score > closed_score:
-            result = matched_value
-        elif closed_score < self.TILE_CLOSED_MIN_SCORE and matched_value is not None:
-            result = matched_value
+        # Always pick the highest-scoring bank; ties go to closed (None).
+        result: int | None = matched_value if state_score > closed_score else None
 
         log_lines = [
             f"source={image_path}",
