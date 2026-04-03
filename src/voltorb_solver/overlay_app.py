@@ -442,24 +442,77 @@ class OverlayControlWindow(QMainWindow):
         self.monitor_hint.setWordWrap(True)
         monitor_layout.addWidget(self.monitor_hint)
 
-        self.window_hint = QLabel("Capture target: selected monitor.")
-        self.window_hint.setObjectName("HintLabel")
-        self.window_hint.setWordWrap(True)
-        monitor_layout.addWidget(self.window_hint)
+        window_row = QHBoxLayout()
+        window_row.setSpacing(8)
+        self.target_window_btn = QPushButton("Pick Target Window")
+        self.target_window_btn.setObjectName("SecondaryButton")
+        self.target_window_btn.clicked.connect(self._handle_target_window_button)
+        window_row.addWidget(self.target_window_btn)
+        self.window_name_label = QLabel("No window selected.")
+        self.window_name_label.setObjectName("HintLabel")
+        self.window_name_label.setWordWrap(False)
+        window_row.addWidget(self.window_name_label, 1)
+        monitor_layout.addLayout(window_row)
 
         layout.addWidget(monitor_card)
 
-        actions_card = QFrame()
-        actions_card.setObjectName("Card")
-        actions_layout = QVBoxLayout(actions_card)
-        actions_layout.setContentsMargins(14, 12, 14, 12)
-        actions_layout.setSpacing(8)
+        # ── Runtime section ──────────────────────────────────────────────────
+        runtime_card = QFrame()
+        runtime_card.setObjectName("Card")
+        runtime_layout = QVBoxLayout(runtime_card)
+        runtime_layout.setContentsMargins(14, 12, 14, 12)
+        runtime_layout.setSpacing(8)
 
-        button_row = QHBoxLayout()
-        button_row.setSpacing(8)
-        self.target_window_btn = QPushButton("Target Window")
-        self.target_window_btn.setObjectName("SecondaryButton")
-        self.target_window_btn.clicked.connect(self._handle_target_window_button)
+        runtime_header = QLabel("Game Controls")
+        runtime_header.setObjectName("FieldLabel")
+        runtime_layout.addWidget(runtime_header)
+
+        runtime_btn_row = QHBoxLayout()
+        runtime_btn_row.setSpacing(8)
+        self.start_game_btn = QPushButton("Start Game")
+        self.start_game_btn.setObjectName("PrimaryButton")
+        self.start_game_btn.clicked.connect(self._start_game)
+        self.clear_game_btn = QPushButton("Clear Game")
+        self.clear_game_btn.setObjectName("DangerButton")
+        self.clear_game_btn.clicked.connect(self.clear_overlay)
+        runtime_btn_row.addWidget(self.start_game_btn)
+        runtime_btn_row.addWidget(self.clear_game_btn)
+        runtime_btn_row.addStretch(1)
+        runtime_layout.addLayout(runtime_btn_row)
+        layout.addWidget(runtime_card)
+
+        # ── Debug section (collapsible) ───────────────────────────────────────
+        debug_card = QFrame()
+        debug_card.setObjectName("Card")
+        debug_card_layout = QVBoxLayout(debug_card)
+        debug_card_layout.setContentsMargins(14, 12, 14, 12)
+        debug_card_layout.setSpacing(6)
+
+        debug_header_row = QHBoxLayout()
+        debug_header_row.setSpacing(8)
+        debug_section_label = QLabel("Debug Tools")
+        debug_section_label.setObjectName("FieldLabel")
+        debug_header_row.addWidget(debug_section_label)
+        debug_header_row.addStretch(1)
+        self.debug_toggle_btn = QPushButton("▶ Show")
+        self.debug_toggle_btn.setObjectName("SecondaryButton")
+        self.debug_toggle_btn.clicked.connect(self._toggle_debug_section)
+        debug_header_row.addWidget(self.debug_toggle_btn)
+        debug_card_layout.addLayout(debug_header_row)
+
+        self.debug_content = QWidget()
+        debug_content_layout = QVBoxLayout(self.debug_content)
+        debug_content_layout.setContentsMargins(0, 4, 0, 0)
+        debug_content_layout.setSpacing(8)
+
+        options_row = QHBoxLayout()
+        options_row.setSpacing(8)
+        self.debug_checkbox = QCheckBox("Debug")
+        self.debug_checkbox.setObjectName("DebugCheck")
+        options_row.addWidget(self.debug_checkbox)
+        options_row.addStretch(1)
+        debug_content_layout.addLayout(options_row)
+
         self.relabel_btn = QPushButton("Label/relabel game")
         self.relabel_btn.setObjectName("SecondaryButton")
         self.relabel_btn.clicked.connect(self.relabel_regions)
@@ -473,20 +526,13 @@ class OverlayControlWindow(QMainWindow):
         self.clear_btn.setObjectName("DangerButton")
         self.clear_btn.clicked.connect(self.clear_overlay)
 
-        options_row = QHBoxLayout()
-        options_row.setSpacing(8)
-        self.debug_checkbox = QCheckBox("Debug")
-        self.debug_checkbox.setObjectName("DebugCheck")
-        options_row.addWidget(self.debug_checkbox)
-        options_row.addStretch(1)
-
-        button_row.addWidget(self.target_window_btn)
-        button_row.addWidget(self.relabel_btn)
-        button_row.addWidget(self.parse_all_clues_btn)
-        button_row.addWidget(self.parse_tiles_btn)
-        button_row.addWidget(self.clear_btn)
-        actions_layout.addLayout(options_row)
-        actions_layout.addLayout(button_row)
+        debug_btn_row = QHBoxLayout()
+        debug_btn_row.setSpacing(8)
+        debug_btn_row.addWidget(self.relabel_btn)
+        debug_btn_row.addWidget(self.parse_all_clues_btn)
+        debug_btn_row.addWidget(self.parse_tiles_btn)
+        debug_btn_row.addWidget(self.clear_btn)
+        debug_content_layout.addLayout(debug_btn_row)
 
         self.overlay_btn = QPushButton("Enable Debug Overlay")
         self.overlay_btn.setObjectName("AccentToggle")
@@ -500,20 +546,17 @@ class OverlayControlWindow(QMainWindow):
         overlay_btns_row.setSpacing(8)
         overlay_btns_row.addWidget(self.overlay_btn)
         overlay_btns_row.addWidget(self.prob_overlay_btn)
-        actions_layout.addLayout(overlay_btns_row)
-        layout.addWidget(actions_card)
+        debug_content_layout.addLayout(overlay_btns_row)
 
-        help_text = QLabel(
-            "Tip: Pick a target emulator window, then press Parse All Clues to capture and parse in one step."
-            " Enable the overlay to view regions live."
-        )
-        help_text.setObjectName("HintLabel")
-        help_text.setWordWrap(True)
-        layout.addWidget(help_text)
+        self.debug_content.setVisible(False)
+        debug_card_layout.addWidget(self.debug_content)
+        layout.addWidget(debug_card)
+
         layout.addStretch(1)
 
         self._apply_styles()
         self._update_target_window_button()
+        self._update_window_name_label()
         self._set_status("No screenshot parsed yet.", level="info")
         self._refresh_monitor_list()
 
@@ -639,6 +682,21 @@ class OverlayControlWindow(QMainWindow):
             """
         )
 
+    def _toggle_debug_section(self) -> None:
+        visible = self.debug_content.isVisible()
+        self.debug_content.setVisible(not visible)
+        self.debug_toggle_btn.setText("\u25bc Hide" if not visible else "\u25b6 Show")
+
+    def _start_game(self) -> None:
+        if self.state.target_window_id is None:
+            self._show_error("No target window selected. Use 'Pick Target Window' first.")
+            return
+        self.relabel_regions()
+        self.parse_all_clues()
+        self.parse_tiles()
+        if not self.prob_overlay_btn.isChecked():
+            self.prob_overlay_btn.setChecked(True)
+
     def _set_status(self, message: str, level: str = "info") -> None:
         style_map = {
             "info": ("#f5f9fc", "#d1deea", "#2f4d66"),
@@ -664,15 +722,15 @@ class OverlayControlWindow(QMainWindow):
             f"Selected monitor geometry: {geo.width()}x{geo.height()} at ({geo.x()}, {geo.y()})."
         )
 
-    def _update_window_hint(self) -> None:
+    def _update_window_name_label(self) -> None:
         if self.state.target_window_id is None:
-            self.window_hint.setText("Capture target: selected monitor.")
-            return
+            self.window_name_label.setText("No window selected.")
+        else:
+            name = self.state.target_window_name or "Unnamed window"
+            self.window_name_label.setText(f"{name}  (id: {self.state.target_window_id})")
 
-        name = self.state.target_window_name or "Unnamed window"
-        self.window_hint.setText(
-            f"Capture target window: #{self.state.target_window_id} ({name})."
-        )
+    def _update_window_hint(self) -> None:
+        self._update_window_name_label()
 
     def _update_target_window_button(self) -> None:
         if self.state.target_window_id is None:
