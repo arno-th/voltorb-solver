@@ -70,7 +70,7 @@ class ImageParser:
     _TOTAL_OCR_BOUNDS = (0.30, 0.02, 0.99, 0.42)
     _VOLTORB_OCR_BOUNDS = (0.615, 0.50, 0.99, 0.98)
 
-    _TEMPLATE_MIN_SCORE = 0.90
+    _TEMPLATE_MIN_SCORE = 0.85
     TILE_CLOSED_MIN_SCORE = 0.75
     TILE_STATE_MIN_SCORE = 0.78
     _TILE_CANONICAL_SIZE = (64, 64)
@@ -302,7 +302,8 @@ class ImageParser:
         out_dir = self._project_root() / "assets/templates/raw/clue_unknown"
         out_dir.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        file_name = f"{stamp}_{axis}_{kind}_{digest}.png"
+        kind = "t" if kind.lower() == "top" else "v" if kind.lower() == "bottom" else kind
+        file_name = f"clue_{axis}_{kind}_{digest}_{stamp}.png"
         out_path = out_dir / file_name
         cv2.imwrite(str(out_path), roi)
 
