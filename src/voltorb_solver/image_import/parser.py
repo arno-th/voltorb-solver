@@ -74,6 +74,7 @@ class ImageParser:
     TILE_CLOSED_MIN_SCORE = 0.75
     TILE_STATE_MIN_SCORE = 0.78
     _TILE_CANONICAL_SIZE = (64, 64)
+    _CLUE_DIGIT_CANONICAL_SIZE = (32, 32)  # w, h for clue digit templates
 
     def __init__(self) -> None:
         self._templates_loaded = False
@@ -139,7 +140,9 @@ class ImageParser:
             return None
         x0, x1 = int(xs.min()), int(xs.max()) + 1
         y0, y1 = int(ys.min()), int(ys.max()) + 1
-        return bw[y0:y1, x0:x1]
+        tight = bw[y0:y1, x0:x1]
+        # Resize to a fixed canonical size so matching is always scale-invariant.
+        return cv2.resize(tight, self._CLUE_DIGIT_CANONICAL_SIZE, interpolation=cv2.INTER_AREA)
 
     def _load_clue_templates(self) -> None:
         if self._templates_loaded or cv2 is None:
@@ -262,6 +265,19 @@ class ImageParser:
         best_score = -1.0
         seen_templates: set[int] = set()
 
+        # Normalize the live ROI to the same canonical size as stored templates so
+        # matching is scale-invariant and produces a 1×1 response (pure shape score).
+        bw_tight_ys, bw_tight_xs = np.where(bw > 0)
+        if len(bw_tight_xs) == 0:
+            if save_if_unmatched:
+                self._save_unmatched_template_sample(roi, kind=kind, axis=axis, source_tag=source_tag)
+            return None, -1.0
+        bx0, bx1 = int(bw_tight_xs.min()), int(bw_tight_xs.max()) + 1
+        by0, by1 = int(bw_tight_ys.min()), int(bw_tight_ys.max()) + 1
+        bw_canonical = cv2.resize(
+            bw[by0:by1, bx0:bx1], self._CLUE_DIGIT_CANONICAL_SIZE, interpolation=cv2.INTER_AREA
+        )
+
         for bank in (primary_bank, fallback_bank):
             for value, templates in bank.items():
                 if not (min_value <= value <= max_value):
@@ -271,9 +287,7 @@ class ImageParser:
                     if tid in seen_templates:
                         continue
                     seen_templates.add(tid)
-                    if template.shape[0] > bw.shape[0] or template.shape[1] > bw.shape[1]:
-                        continue
-                    result = cv2.matchTemplate(bw, template, cv2.TM_CCOEFF_NORMED)
+                    result = cv2.matchTemplate(bw_canonical, template, cv2.TM_CCOEFF_NORMED)
                     _, max_val, _, _ = cv2.minMaxLoc(result)
                     score = float(max_val)
                     if score > best_score:
@@ -286,6 +300,70 @@ class ImageParser:
         if save_if_unmatched:
             self._save_unmatched_template_sample(roi, kind=kind, axis=axis, source_tag=source_tag)
         return None, best_score
+
+    def _match_number_template_top_n(
+        self,
+        roi: np.ndarray,
+        *,
+        kind: str,
+        axis: str = "row",
+        min_value: int,
+        max_value: int,
+        n: int = 2,
+    ) -> tuple[np.ndarray | None, list[tuple[int, float, np.ndarray]]]:
+        """Like _match_number_template but returns the canonical ROI image and the
+        top-n (value, score, template_image) results sorted by descending score.
+        Used by the debug path to log runner-up scores and save matched templates.
+        """
+        empty: list[tuple[int, float, np.ndarray]] = []
+        if cv2 is None or roi.size == 0:
+            return None, empty
+
+        self._load_clue_templates()
+        bw = self._binarize(roi)
+        if bw is None:
+            return None, empty
+
+        other_axis = "col" if axis == "row" else "row"
+        primary_bank = self._template_bank.get(f"{axis}_{kind}", {})
+        fallback_bank = self._template_bank.get(f"{other_axis}_{kind}", {})
+
+        bw_tight_ys, bw_tight_xs = np.where(bw > 0)
+        if len(bw_tight_xs) == 0:
+            return None, empty
+        bx0, bx1 = int(bw_tight_xs.min()), int(bw_tight_xs.max()) + 1
+        by0, by1 = int(bw_tight_ys.min()), int(bw_tight_ys.max()) + 1
+        bw_canonical = cv2.resize(
+            bw[by0:by1, bx0:bx1], self._CLUE_DIGIT_CANONICAL_SIZE, interpolation=cv2.INTER_AREA
+        )
+
+        results: list[tuple[int, float, np.ndarray]] = []
+        seen_templates: set[int] = set()
+        # Track best score per value to avoid duplicating the same value entry.
+        best_per_value: dict[int, tuple[float, np.ndarray]] = {}
+
+        for bank in (primary_bank, fallback_bank):
+            for value, templates in bank.items():
+                if not (min_value <= value <= max_value):
+                    continue
+                for template in templates:
+                    tid = id(template)
+                    if tid in seen_templates:
+                        continue
+                    seen_templates.add(tid)
+                    result = cv2.matchTemplate(bw_canonical, template, cv2.TM_CCOEFF_NORMED)
+                    _, max_val, _, _ = cv2.minMaxLoc(result)
+                    score = float(max_val)
+                    prev = best_per_value.get(value)
+                    if prev is None or score > prev[0]:
+                        best_per_value[value] = (score, template)
+
+        results = [
+            (value, score, tpl)
+            for value, (score, tpl) in best_per_value.items()
+        ]
+        results.sort(key=lambda t: t[1], reverse=True)
+        return bw_canonical, results[:n]
 
     def _save_unmatched_template_sample(self, roi: np.ndarray, *, kind: str, axis: str, source_tag: str) -> None:
         if cv2 is None or roi.size == 0:
@@ -803,12 +881,23 @@ class ImageParser:
             source_tag="debug:total",
         )
 
-        voltorbs_norm = self._binarize(voltorbs_roi)
-        if voltorbs_norm is not None:
-            cv2.imwrite(str(normalized_voltorbs_path), voltorbs_norm)
-        total_norm = self._binarize(total_roi)
-        if total_norm is not None:
-            cv2.imwrite(str(normalized_total_path), total_norm)
+        # --- top-2 match details for debugging ---
+        voltorbs_canonical, voltorbs_top2 = self._match_number_template_top_n(
+            voltorbs_roi, kind="bottom", axis=axis, min_value=0, max_value=5
+        )
+        total_canonical, total_top2 = self._match_number_template_top_n(
+            total_roi, kind="top", axis=axis, min_value=0, max_value=15
+        )
+
+        if voltorbs_canonical is not None:
+            cv2.imwrite(str(normalized_voltorbs_path), voltorbs_canonical)
+        if total_canonical is not None:
+            cv2.imwrite(str(normalized_total_path), total_canonical)
+
+        for rank, (val, score, tpl) in enumerate(voltorbs_top2, start=1):
+            cv2.imwrite(str(run_dir / f"voltorbs_match{rank}_v{val}_s{score:.3f}.png"), tpl)
+        for rank, (val, score, tpl) in enumerate(total_top2, start=1):
+            cv2.imwrite(str(run_dir / f"total_match{rank}_v{val}_s{score:.3f}.png"), tpl)
 
         voltorbs_text = (
             f"match:{voltorbs_value} score={voltorbs_score:.3f}"
@@ -820,6 +909,9 @@ class ImageParser:
             if total_value is not None
             else f"no_match score={total_score:.3f}"
         )
+
+        def _top2_log(top2: list[tuple[int, float, np.ndarray]]) -> str:
+            return "  |  ".join(f"#{i+1} v={v} s={s:.3f}" for i, (v, s, _) in enumerate(top2))
 
         log_lines = [
             f"source={image_path}",
@@ -833,6 +925,8 @@ class ImageParser:
             f"total_value={total_value}",
             f"voltorbs_score={voltorbs_score:.3f}",
             f"total_score={total_score:.3f}",
+            f"voltorbs_top2=[{_top2_log(voltorbs_top2)}]",
+            f"total_top2=[{_top2_log(total_top2)}]",
         ]
         log_path.write_text("\n".join(log_lines) + "\n", encoding="utf-8")
 
