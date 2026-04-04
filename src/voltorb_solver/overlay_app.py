@@ -6,9 +6,11 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import threading
+import time
 from tempfile import gettempdir
 
-from PySide6.QtCore import Qt, QRect
+from PySide6.QtCore import Qt, QRect, QTimer
 from PySide6.QtGui import QColor, QGuiApplication, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -480,11 +482,15 @@ class OverlayControlWindow(QMainWindow):
         self.refresh_tiles_btn = QPushButton("Refresh Tiles")
         self.refresh_tiles_btn.setObjectName("SecondaryButton")
         self.refresh_tiles_btn.clicked.connect(self._refresh_tiles)
+        self.click_tile_btn = QPushButton("Click Tile")
+        self.click_tile_btn.setObjectName("PrimaryButton")
+        self.click_tile_btn.clicked.connect(self._click_best_tile)
         self.clear_game_btn = QPushButton("Clear Game")
         self.clear_game_btn.setObjectName("DangerButton")
         self.clear_game_btn.clicked.connect(self.clear_overlay)
         runtime_btn_row.addWidget(self.start_game_btn)
         runtime_btn_row.addWidget(self.refresh_tiles_btn)
+        runtime_btn_row.addWidget(self.click_tile_btn)
         runtime_btn_row.addWidget(self.clear_game_btn)
         runtime_btn_row.addStretch(1)
         runtime_layout.addLayout(runtime_btn_row)
@@ -826,6 +832,115 @@ class OverlayControlWindow(QMainWindow):
         self.parse_tiles()
         if not self.prob_overlay_btn.isChecked():
             self.prob_overlay_btn.setChecked(True)
+
+    def _click_best_tile(self) -> None:
+        if self._last_capture_signature is None or self._last_image_size is None:
+            self._show_error("No game parsed yet. Use 'Start Game' first.")
+            return
+
+        tile_regions = [r for r in self._last_parse_regions if self._is_tile_region(r.name)]
+        if not tile_regions:
+            self._show_error("No tile regions found. Run 'Start Game' first.")
+            return
+
+        snapshot = solve_game_state(self._game_state)
+        if snapshot.total_configurations == 0:
+            self._show_error("No valid configurations — cannot determine best tile.")
+            return
+
+        # Find the safest useful unrevealed tile (lowest bomb probability).
+        best_region: Region | None = None
+        min_prob = float("inf")
+        for region in tile_regions:
+            m = re.match(r"^\((\d),(\d)\)$", region.name)
+            if not m:
+                continue
+            r_idx, c_idx = int(m.group(1)), int(m.group(2))
+            if self._game_state.board[r_idx][c_idx].revealed:
+                continue
+            pos = (r_idx, c_idx)
+            if pos not in snapshot.useful_positions:
+                continue
+            prob = snapshot.bomb_probabilities.get(pos, 1.0)
+            if prob < min_prob:
+                min_prob = prob
+                best_region = region
+
+        if best_region is None:
+            self._show_error("No recommended tile found (all useful tiles may be revealed).")
+            return
+
+        # Map tile region to absolute screen coordinates.
+        image_w, image_h = self._last_image_size
+        mapping_rect = self._mapping_rect_for_signature(self._last_capture_signature)
+        if mapping_rect is None:
+            screen = self._get_selected_screen()
+            if screen is None:
+                self._show_error("No monitor selected.")
+                return
+            geo = screen.geometry()
+            mapping_rect = _map_image_to_overlay(geo.width(), geo.height(), image_w, image_h)
+            mapping_rect.translate(geo.x(), geo.y())
+
+        rect = _map_region_rect(best_region, mapping_rect, image_w, image_h)
+        cx = rect.center().x()
+        cy = rect.center().y()
+
+        if shutil.which("xdotool") is None:
+            self._show_error("`xdotool` not found. Install xdotool to use Click Tile.")
+            return
+
+        tile_name = best_region.name
+        window_id = self.state.target_window_id
+
+        def _do_click() -> None:
+            # Small delay to let Qt finish processing the button-release event.
+            time.sleep(0.3)
+            try:
+                # Focus the emulator window: try wmctrl first (hex window id),
+                # fall back to xdotool windowfocus.
+                if window_id is not None:
+                    if shutil.which("wmctrl"):
+                        subprocess.run(
+                            ["wmctrl", "-ia", hex(window_id)],
+                            check=False, capture_output=True,
+                        )
+                    else:
+                        subprocess.run(
+                            ["xdotool", "windowfocus", "--sync", str(window_id)],
+                            check=False, capture_output=True,
+                        )
+                    time.sleep(0.15)
+
+                # Move cursor to tile centre.
+                subprocess.run(
+                    ["xdotool", "mousemove", "--sync", str(cx), str(cy)],
+                    check=False, capture_output=True,
+                )
+                time.sleep(0.1)
+
+                # Press and release separately — some apps ignore the compound click.
+                subprocess.run(
+                    ["xdotool", "mousedown", "--clearmodifiers", "1"],
+                    check=False, capture_output=True,
+                )
+                time.sleep(0.08)
+                subprocess.run(
+                    ["xdotool", "mouseup", "--clearmodifiers", "1"],
+                    check=False, capture_output=True,
+                )
+            except Exception as exc:
+                self._set_status(f"Failed to click tile: {exc}", level="error")
+                return
+
+        # Show the equivalent manual command so you can test it in a terminal.
+        manual_cmd = f"xdotool mousemove --sync {cx} {cy} mousedown --clearmodifiers 1 mouseup --clearmodifiers 1"
+        self._set_status(
+            f"Clicking {tile_name} at ({cx}, {cy}) — bomb prob {min_prob:.1%}.  "
+            f"Manual: {manual_cmd}",
+            level="success",
+        )
+        threading.Thread(target=_do_click, daemon=True).start()
 
     def _refresh_tiles(self) -> None:
         if self.state.last_input_path is None:
