@@ -401,6 +401,7 @@ class OverlayControlWindow(QMainWindow):
         self._tile_dataset_root = Path("assets/parser_debug/tile_dataset")
         self._tile_parsed_values: dict[str, int | None] = {}
         self._game_state = GameState()
+        self._play_level_running = False
 
         root = QWidget()
         root.setObjectName("RootPanel")
@@ -492,15 +493,15 @@ class OverlayControlWindow(QMainWindow):
         self.refresh_tiles_btn = QPushButton("Refresh Tiles")
         self.refresh_tiles_btn.setObjectName("SecondaryButton")
         self.refresh_tiles_btn.clicked.connect(self._refresh_tiles)
-        self.click_tile_btn = QPushButton("Click Tile")
-        self.click_tile_btn.setObjectName("PrimaryButton")
-        self.click_tile_btn.clicked.connect(self._click_best_tile)
+        self.play_level_btn = QPushButton("Play Level")
+        self.play_level_btn.setObjectName("PrimaryButton")
+        self.play_level_btn.clicked.connect(self._play_level)
         self.clear_game_btn = QPushButton("Clear Game")
         self.clear_game_btn.setObjectName("DangerButton")
         self.clear_game_btn.clicked.connect(self.clear_overlay)
         runtime_btn_row.addWidget(self.start_game_btn)
         runtime_btn_row.addWidget(self.refresh_tiles_btn)
-        runtime_btn_row.addWidget(self.click_tile_btn)
+        runtime_btn_row.addWidget(self.play_level_btn)
         runtime_btn_row.addWidget(self.clear_game_btn)
         runtime_btn_row.addStretch(1)
         runtime_layout.addLayout(runtime_btn_row)
@@ -1216,6 +1217,238 @@ class OverlayControlWindow(QMainWindow):
             level="success",
         )
         threading.Thread(target=_do_click, daemon=True).start()
+
+    # ── Play Level ───────────────────────────────────────────────────────────
+
+    def _play_level(self) -> None:
+        """Toggle automated level play: click best tile, handle dialogs, repeat."""
+        if self._play_level_running:
+            self._play_level_running = False
+            self.play_level_btn.setText("Play Level")
+            self._set_status("Play Level stopped.", level="info")
+            return
+
+        if self._last_capture_signature is None or self._last_image_size is None:
+            self._show_error("No game parsed yet. Use 'Start Game' first.")
+            return
+        if shutil.which("xdotool") is None:
+            self._show_error("`xdotool` not found. Install xdotool to use Play Level.")
+            return
+        tile_regions = [r for r in self._last_parse_regions if self._is_tile_region(r.name)]
+        if not tile_regions:
+            self._show_error("No tile regions found. Run 'Start Game' first.")
+            return
+
+        self._play_level_running = True
+        self.play_level_btn.setText("Stop Play")
+        self._set_status("Play Level started…", level="info")
+        threading.Thread(target=self._play_level_loop, daemon=True).start()
+
+    def _play_level_loop(self) -> None:
+        """Background thread: click best tile → handle textbox dialogs → re-eval → repeat."""
+        MAX_ITERATIONS = 50
+        MAX_TEXTBOX_CLICKS = 30
+
+        try:
+            for iteration in range(MAX_ITERATIONS):
+                if not self._play_level_running:
+                    break
+
+                # ── 1. Find and click best tile ──────────────────────────────
+                click_info = self._play_find_best_tile()
+                if click_info is None:
+                    QTimer.singleShot(0, lambda: self._set_status(
+                        "No recommended unrevealed tile found. Level may be complete.",
+                        level="info",
+                    ))
+                    break
+
+                tile_name, cx, cy = click_info
+                window_id = self.state.target_window_id
+                n = iteration + 1
+                QTimer.singleShot(0, lambda tn=tile_name, px=cx, py=cy, i=n: self._set_status(
+                    f"[{i}] Clicking {tn} at ({px}, {py})…", level="info",
+                ))
+                self._play_do_xdotool_click(cx, cy, window_id)
+                time.sleep(0.8)
+
+                # ── 2. Textbox/dialog loop ────────────────────────────────────
+                game_clear = False
+                for _ in range(MAX_TEXTBOX_CLICKS):
+                    if not self._play_level_running:
+                        break
+
+                    has_textbox = self._play_check_template_sync(
+                        _TEXTBOX_REGION, _TEXTBOX_TEMPLATE_PATH, _TEXTBOX_MATCH_THRESHOLD,
+                    )
+                    if not has_textbox:
+                        break
+
+                    is_clear = self._play_check_template_sync(
+                        _TEXTBOX_GAME_CLEAR_REGION,
+                        _TEXTBOX_GAME_CLEAR_TEMPLATE_PATH,
+                        _TEXTBOX_GAME_CLEAR_MATCH_THRESHOLD,
+                    )
+                    if is_clear:
+                        game_clear = True
+                        QTimer.singleShot(0, lambda: self._set_status(
+                            "Game Clear! Level complete.", level="success",
+                        ))
+                        break
+
+                    # Not game clear — click to advance the dialog, then recheck.
+                    self._play_click_game_center()
+                    time.sleep(0.5)
+
+                if game_clear or not self._play_level_running:
+                    break
+
+                # ── 3. Re-evaluate board state ───────────────────────────────
+                done_event = threading.Event()
+
+                def _do_refresh(_ev=done_event):
+                    try:
+                        self._refresh_tiles()
+                    finally:
+                        _ev.set()
+
+                QTimer.singleShot(0, _do_refresh)
+                done_event.wait(timeout=10.0)
+                time.sleep(0.2)
+        finally:
+            self._play_level_running = False
+            QTimer.singleShot(0, lambda: self.play_level_btn.setText("Play Level"))
+
+    def _play_find_best_tile(self) -> tuple[str, int, int] | None:
+        """Return (tile_name, screen_cx, screen_cy) for the safest useful tile, or None."""
+        if self._last_capture_signature is None or self._last_image_size is None:
+            return None
+
+        tile_regions = [r for r in self._last_parse_regions if self._is_tile_region(r.name)]
+        snapshot = solve_game_state(self._game_state)
+        if snapshot.total_configurations == 0:
+            return None
+
+        best_region: Region | None = None
+        min_prob = float("inf")
+        for region in tile_regions:
+            m = re.match(r"^\((\d),(\d)\)$", region.name)
+            if not m:
+                continue
+            r_idx, c_idx = int(m.group(1)), int(m.group(2))
+            if self._game_state.board[r_idx][c_idx].revealed:
+                continue
+            pos = (r_idx, c_idx)
+            if pos not in snapshot.useful_positions:
+                continue
+            prob = snapshot.bomb_probabilities.get(pos, 1.0)
+            if prob < min_prob:
+                min_prob = prob
+                best_region = region
+
+        if best_region is None:
+            return None
+
+        image_w, image_h = self._last_image_size
+        mapping_rect = self._mapping_rect_for_signature(self._last_capture_signature)
+        if mapping_rect is None:
+            screen = self._get_selected_screen()
+            if screen is None:
+                return None
+            geo = screen.geometry()
+            mapping_rect = _map_image_to_overlay(geo.width(), geo.height(), image_w, image_h)
+            mapping_rect.translate(geo.x(), geo.y())
+
+        rect = _map_region_rect(best_region, mapping_rect, image_w, image_h)
+        return best_region.name, rect.center().x(), rect.center().y()
+
+    def _play_do_xdotool_click(self, cx: int, cy: int, window_id: int | None) -> None:
+        """Perform a mouse click at (cx, cy) via xdotool (safe to call from any thread)."""
+        try:
+            if window_id is not None:
+                if shutil.which("wmctrl"):
+                    subprocess.run(["wmctrl", "-ia", hex(window_id)], check=False, capture_output=True)
+                else:
+                    subprocess.run(
+                        ["xdotool", "windowfocus", "--sync", str(window_id)],
+                        check=False, capture_output=True,
+                    )
+                time.sleep(0.15)
+            subprocess.run(["xdotool", "mousemove", "--sync", str(cx), str(cy)], check=False, capture_output=True)
+            time.sleep(0.1)
+            subprocess.run(["xdotool", "mousedown", "--clearmodifiers", "1"], check=False, capture_output=True)
+            time.sleep(0.08)
+            subprocess.run(["xdotool", "mouseup", "--clearmodifiers", "1"], check=False, capture_output=True)
+        except Exception:
+            pass
+
+    def _play_check_template_sync(
+        self,
+        region: tuple[float, float, float, float],
+        template_path: Path,
+        threshold: float,
+    ) -> bool:
+        """Thread-safe template match: Qt capture is dispatched to the main thread."""
+        if _cv2 is None or not template_path.exists():
+            return False
+
+        result_holder: list[object] = [None]
+        done = threading.Event()
+
+        def _capture(_rh=result_holder, _ev=done):
+            try:
+                _rh[0] = self._grab_textbox_crop(region)
+            finally:
+                _ev.set()
+
+        QTimer.singleShot(0, _capture)
+        done.wait(timeout=5.0)
+
+        crop_result = result_holder[0]
+        if crop_result is None:
+            return False
+        crop, _ = crop_result  # type: ignore[misc]
+
+        template = _cv2.imread(str(template_path))
+        if template is None:
+            return False
+
+        th, tw = template.shape[:2]
+        ch, cw = crop.shape[:2]
+        if tw > cw or th > ch:
+            scale = min(cw / tw, ch / th)
+            template = _cv2.resize(
+                template,
+                (max(1, int(tw * scale)), max(1, int(th * scale))),
+                interpolation=_cv2.INTER_AREA,
+            )
+
+        gray_crop = _cv2.cvtColor(crop, _cv2.COLOR_BGR2GRAY)
+        gray_tpl = _cv2.cvtColor(template, _cv2.COLOR_BGR2GRAY)
+        result_map = _cv2.matchTemplate(gray_crop, gray_tpl, _cv2.TM_CCOEFF_NORMED)
+        _, score, _, _ = _cv2.minMaxLoc(result_map)
+        return score >= threshold
+
+    def _play_click_game_center(self) -> None:
+        """Click the centre of the game area to advance a dialog box."""
+        mapping_rect = self._mapping_rect_for_signature(self._last_capture_signature)
+        if mapping_rect is not None:
+            cx = mapping_rect.center().x()
+            cy = mapping_rect.center().y()
+        else:
+            screen = self._get_selected_screen()
+            if screen is None:
+                return
+            geo = screen.geometry()
+            if self._last_image_size:
+                mr = _map_image_to_overlay(geo.width(), geo.height(), *self._last_image_size)
+                mr.translate(geo.x(), geo.y())
+                cx = mr.center().x()
+                cy = mr.center().y()
+            else:
+                cx = geo.center().x()
+                cy = geo.center().y()
+        self._play_do_xdotool_click(cx, cy, self.state.target_window_id)
 
     def _refresh_tiles(self) -> None:
         if self.state.last_input_path is None:
