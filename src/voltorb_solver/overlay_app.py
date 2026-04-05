@@ -61,9 +61,9 @@ _TEXTBOX_REGION = (0.07, 0.974, 0.10, 0.993)
 _TEXTBOX_TEMPLATE_PATH = Path("assets/templates/textbox_indicator.png")
 _TEXTBOX_MATCH_THRESHOLD = 0.90
 
-_TEXTBOX2_REGION = (0.07, 0.9, 0.2, 0.935)
-_TEXTBOX2_TEMPLATE_PATH = Path("assets/templates/textbox_indicator2.png")
-_TEXTBOX2_MATCH_THRESHOLD = 0.90
+_TEXTBOX_GAME_CLEAR_REGION = (0.07, 0.9, 0.2, 0.935)
+_TEXTBOX_GAME_CLEAR_TEMPLATE_PATH = Path("assets/templates/textbox_game_clear.png")
+_TEXTBOX_GAME_CLEAR_MATCH_THRESHOLD = 0.90
 
 
 def _bind_widget_to_screen(widget: QWidget, screen) -> None:
@@ -615,26 +615,26 @@ class OverlayControlWindow(QMainWindow):
         textbox_row.addStretch(1)
         debug_content_layout.addLayout(textbox_row)
 
-        textbox2_label = QLabel("Text-box Detection 2")
-        textbox2_label.setObjectName("FieldLabel")
-        debug_content_layout.addWidget(textbox2_label)
+        textbox_game_clear_label = QLabel("Game Clear Text-box")
+        textbox_game_clear_label.setObjectName("FieldLabel")
+        debug_content_layout.addWidget(textbox_game_clear_label)
 
-        textbox2_row = QHBoxLayout()
-        textbox2_row.setSpacing(8)
-        self.check_textbox2_btn = QPushButton("Check Text Box")
-        self.check_textbox2_btn.setObjectName("PrimaryButton")
-        self.check_textbox2_btn.clicked.connect(self._check_textbox2_template)
-        self.save_textbox2_tpl_btn = QPushButton("Save as Template")
-        self.save_textbox2_tpl_btn.setObjectName("SecondaryButton")
-        self.save_textbox2_tpl_btn.clicked.connect(self._capture_textbox2_template)
-        self.show_textbox2_region_btn = QPushButton("Show Region")
-        self.show_textbox2_region_btn.setObjectName("SecondaryButton")
-        self.show_textbox2_region_btn.clicked.connect(self._show_textbox2_region_overlay)
-        textbox2_row.addWidget(self.check_textbox2_btn)
-        textbox2_row.addWidget(self.save_textbox2_tpl_btn)
-        textbox2_row.addWidget(self.show_textbox2_region_btn)
-        textbox2_row.addStretch(1)
-        debug_content_layout.addLayout(textbox2_row)
+        textbox_game_clear_row = QHBoxLayout()
+        textbox_game_clear_row.setSpacing(8)
+        self.check_textbox_game_clear_btn = QPushButton("Check Text Box")
+        self.check_textbox_game_clear_btn.setObjectName("PrimaryButton")
+        self.check_textbox_game_clear_btn.clicked.connect(self._check_textbox_game_clear_template)
+        self.save_textbox_game_clear_tpl_btn = QPushButton("Save as Template")
+        self.save_textbox_game_clear_tpl_btn.setObjectName("SecondaryButton")
+        self.save_textbox_game_clear_tpl_btn.clicked.connect(self._capture_textbox_game_clear_template)
+        self.show_textbox_game_clear_region_btn = QPushButton("Show Region")
+        self.show_textbox_game_clear_region_btn.setObjectName("SecondaryButton")
+        self.show_textbox_game_clear_region_btn.clicked.connect(self._show_textbox_game_clear_region_overlay)
+        textbox_game_clear_row.addWidget(self.check_textbox_game_clear_btn)
+        textbox_game_clear_row.addWidget(self.save_textbox_game_clear_tpl_btn)
+        textbox_game_clear_row.addWidget(self.show_textbox_game_clear_region_btn)
+        textbox_game_clear_row.addStretch(1)
+        debug_content_layout.addLayout(textbox_game_clear_row)
 
         self.debug_content.setVisible(False)
         debug_card_layout.addWidget(self.debug_content)
@@ -930,8 +930,8 @@ class OverlayControlWindow(QMainWindow):
     def _show_textbox_region_overlay(self) -> None:
         self._show_textbox_region_overlay_for(_TEXTBOX_REGION, QColor(255, 80, 200), "Textbox 1")
 
-    def _show_textbox2_region_overlay(self) -> None:
-        self._show_textbox_region_overlay_for(_TEXTBOX2_REGION, QColor(80, 200, 255), "Textbox 2")
+    def _show_textbox_game_clear_region_overlay(self) -> None:
+        self._show_textbox_region_overlay_for(_TEXTBOX_GAME_CLEAR_REGION, QColor(80, 200, 255), "Game Clear")
 
     # ── Text-box detection ───────────────────────────────────────────────────
 
@@ -1092,11 +1092,11 @@ class OverlayControlWindow(QMainWindow):
     def _capture_textbox_template(self) -> None:
         self._capture_textbox_template_for(_TEXTBOX_REGION, _TEXTBOX_TEMPLATE_PATH, "Textbox 1")
 
-    def _check_textbox2_template(self) -> None:
-        self._check_textbox_template_for(_TEXTBOX2_REGION, _TEXTBOX2_TEMPLATE_PATH, _TEXTBOX2_MATCH_THRESHOLD, "Textbox 2")
+    def _check_textbox_game_clear_template(self) -> None:
+        self._check_textbox_template_for(_TEXTBOX_GAME_CLEAR_REGION, _TEXTBOX_GAME_CLEAR_TEMPLATE_PATH, _TEXTBOX_GAME_CLEAR_MATCH_THRESHOLD, "Game Clear")
 
-    def _capture_textbox2_template(self) -> None:
-        self._capture_textbox_template_for(_TEXTBOX2_REGION, _TEXTBOX2_TEMPLATE_PATH, "Textbox 2")
+    def _capture_textbox_game_clear_template(self) -> None:
+        self._capture_textbox_template_for(_TEXTBOX_GAME_CLEAR_REGION, _TEXTBOX_GAME_CLEAR_TEMPLATE_PATH, "Game Clear")
 
     def _start_game(self) -> None:
         if self.state.target_window_id is None:
