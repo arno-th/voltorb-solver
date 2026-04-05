@@ -55,6 +55,12 @@ OVERLAY_COLORS = [
     QColor(0, 200, 83),
 ]
 
+# Region of the captured frame used for the post-click text-box check.
+# (left_frac, top_frac, right_frac, bottom_frac) relative to the game area.
+_TEXTBOX_REGION = (0.07, 0.974, 0.10, 0.993)
+_TEXTBOX_TEMPLATE_PATH = Path("assets/templates/textbox_indicator.png")
+_TEXTBOX_MATCH_THRESHOLD = 0.90
+
 
 def _bind_widget_to_screen(widget: QWidget, screen) -> None:
     if screen is None:
@@ -583,6 +589,28 @@ class OverlayControlWindow(QMainWindow):
         crop_row.addWidget(self.capture_region_btn)
         debug_content_layout.addLayout(crop_row)
 
+        # ── Text-box detection ───────────────────────────────────────────────
+        textbox_label = QLabel("Text-box Detection (bottom-left)")
+        textbox_label.setObjectName("FieldLabel")
+        debug_content_layout.addWidget(textbox_label)
+
+        textbox_row = QHBoxLayout()
+        textbox_row.setSpacing(8)
+        self.check_textbox_btn = QPushButton("Check Text Box")
+        self.check_textbox_btn.setObjectName("PrimaryButton")
+        self.check_textbox_btn.clicked.connect(self._check_textbox_template)
+        self.save_textbox_tpl_btn = QPushButton("Save as Template")
+        self.save_textbox_tpl_btn.setObjectName("SecondaryButton")
+        self.save_textbox_tpl_btn.clicked.connect(self._capture_textbox_template)
+        self.show_textbox_region_btn = QPushButton("Show Region")
+        self.show_textbox_region_btn.setObjectName("SecondaryButton")
+        self.show_textbox_region_btn.clicked.connect(self._show_textbox_region_overlay)
+        textbox_row.addWidget(self.check_textbox_btn)
+        textbox_row.addWidget(self.save_textbox_tpl_btn)
+        textbox_row.addWidget(self.show_textbox_region_btn)
+        textbox_row.addStretch(1)
+        debug_content_layout.addLayout(textbox_row)
+
         self.debug_content.setVisible(False)
         debug_card_layout.addWidget(self.debug_content)
         layout.addWidget(debug_card)
@@ -820,6 +848,196 @@ class OverlayControlWindow(QMainWindow):
 
         self._set_status(
             f"Saved {region_name} ({subsection}) crop → {out_path.name}",
+            level="success",
+        )
+
+    def _show_textbox_region_overlay(self) -> None:
+        screen = self._get_selected_screen()
+        if screen is None:
+            self._show_error("No monitor selected.")
+            return
+
+        mapping_rect = self._mapping_rect_for_signature(self._last_capture_signature)
+        if mapping_rect is not None:
+            gx, gy, gw, gh = (
+                mapping_rect.x(), mapping_rect.y(),
+                mapping_rect.width(), mapping_rect.height(),
+            )
+        else:
+            geo = screen.geometry()
+            if self._last_image_size is not None:
+                mr = _map_image_to_overlay(geo.width(), geo.height(), *self._last_image_size)
+                mr.translate(geo.x(), geo.y())
+                gx, gy, gw, gh = mr.x(), mr.y(), mr.width(), mr.height()
+            else:
+                gx, gy, gw, gh = geo.x(), geo.y(), geo.width(), geo.height()
+
+        l_f, t_f, r_f, b_f = _TEXTBOX_REGION
+        rx = gx + int(gw * l_f)
+        ry = gy + int(gh * t_f)
+        rw = max(1, int(gw * (r_f - l_f)))
+        rh = max(1, int(gh * (b_f - t_f)))
+        region_rect = QRect(rx, ry, rw, rh)
+
+        color = QColor(255, 80, 200)
+        segments: list[OverlayBorderWindow] = []
+        for side in ("top", "bottom", "left", "right"):
+            seg = OverlayBorderWindow(color, thickness=3)
+            seg.show_for_rect(region_rect, side, screen=screen)
+            segments.append(seg)
+
+        self._set_status(
+            f"Textbox region: ({rx},{ry}) {rw}\u00d7{rh}px \u2014 overlay visible for 4 s.",
+            level="info",
+        )
+
+        def _hide() -> None:
+            for s in segments:
+                s.hide()
+                s.deleteLater()
+
+        QTimer.singleShot(4000, _hide)
+
+    # ── Text-box detection ───────────────────────────────────────────────────
+
+    def _grab_textbox_crop(self) -> tuple["np.ndarray", str] | None:  # type: ignore[name-defined]
+        """Capture the game window and return the textbox crop (numpy array) + temp path."""
+        if _cv2 is None:
+            self._show_error("OpenCV (cv2) is required for text-box detection.")
+            return None
+
+        # Use the same capture path as relabeling: _capture_window works on
+        # composited desktops, grabWindow(0) (root) does not.
+        if self.state.target_window_id is not None:
+            pixmap = self._capture_window(self.state.target_window_id)
+            # Window-local coords: the pixmap origin is (0,0) = top-left of the window.
+            use_window_local = True
+        else:
+            screen = self._get_selected_screen()
+            if screen is None:
+                self._show_error("No monitor selected.")
+                return None
+            pixmap = screen.grabWindow(0)
+            use_window_local = False
+
+        if pixmap is None or pixmap.isNull():
+            self._show_error("Failed to capture screenshot for text-box detection.")
+            return None
+
+        tmp_path = str(
+            Path(gettempdir())
+            / f"voltorb_textbox_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.png"
+        )
+        if not pixmap.save(tmp_path):
+            self._show_error("Failed to save temporary screenshot.")
+            return None
+
+        image = _cv2.imread(tmp_path)
+        if image is None:
+            self._show_error("Failed to read temporary screenshot.")
+            return None
+
+        img_h, img_w = image.shape[:2]
+
+        if use_window_local:
+            # The pixmap IS the window content; game area fills the whole image.
+            gx, gy, gw, gh = 0, 0, img_w, img_h
+        else:
+            screen = self._get_selected_screen()
+            screen_geo = screen.geometry() if screen else None
+            sx = screen_geo.x() if screen_geo else 0
+            sy = screen_geo.y() if screen_geo else 0
+            mapping_rect = self._mapping_rect_for_signature(self._last_capture_signature)
+            if mapping_rect is not None:
+                gx = mapping_rect.x() - sx
+                gy = mapping_rect.y() - sy
+                gw = mapping_rect.width()
+                gh = mapping_rect.height()
+            elif self._last_image_size is not None and screen_geo is not None:
+                mr = _map_image_to_overlay(screen_geo.width(), screen_geo.height(), *self._last_image_size)
+                gx, gy, gw, gh = mr.x(), mr.y(), mr.width(), mr.height()
+            else:
+                gx, gy, gw, gh = 0, 0, img_w, img_h
+
+        l_f, t_f, r_f, b_f = _TEXTBOX_REGION
+        x0 = max(0, gx + int(gw * l_f))
+        y0 = max(0, gy + int(gh * t_f))
+        x1 = min(img_w, gx + int(gw * r_f))
+        y1 = min(img_h, gy + int(gh * b_f))
+
+        crop = image[y0:y1, x0:x1]
+        if crop.size == 0:
+            self._show_error(
+                f"Textbox crop region is empty (game area: {gx},{gy} {gw}x{gh},"
+                f" crop: {x0},{y0}-{x1},{y1}, image: {img_w}x{img_h})."
+            )
+            return None
+
+        return crop, tmp_path
+
+    def _check_textbox_template(self) -> None:
+        if _cv2 is None:
+            self._show_error("OpenCV (cv2) is required for text-box detection.")
+            return
+
+        result = self._grab_textbox_crop()
+        if result is None:
+            return
+        crop, _ = result
+
+        if not _TEXTBOX_TEMPLATE_PATH.exists():
+            self._set_status(
+                "No textbox template saved yet. Use 'Save as Template' while the text box is visible.",
+                level="warning",
+            )
+            return
+
+        template = _cv2.imread(str(_TEXTBOX_TEMPLATE_PATH))
+        if template is None:
+            self._set_status("Failed to load textbox template.", level="error")
+            return
+
+        # Resize template to fit crop if needed, then run normalised cross-correlation.
+        th, tw = template.shape[:2]
+        ch, cw = crop.shape[:2]
+        if tw > cw or th > ch:
+            scale = min(cw / tw, ch / th)
+            template = _cv2.resize(
+                template,
+                (max(1, int(tw * scale)), max(1, int(th * scale))),
+                interpolation=_cv2.INTER_AREA,
+            )
+
+        gray_crop = _cv2.cvtColor(crop, _cv2.COLOR_BGR2GRAY)
+        gray_tpl = _cv2.cvtColor(template, _cv2.COLOR_BGR2GRAY)
+        result_map = _cv2.matchTemplate(gray_crop, gray_tpl, _cv2.TM_CCOEFF_NORMED)
+        _, score, _, _ = _cv2.minMaxLoc(result_map)
+
+        if score >= _TEXTBOX_MATCH_THRESHOLD:
+            self._set_status(
+                f"Text box detected! Match score: {score:.1%} (threshold {_TEXTBOX_MATCH_THRESHOLD:.0%}).",
+                level="success",
+            )
+        else:
+            self._set_status(
+                f"Text box NOT detected. Match score: {score:.1%} (threshold {_TEXTBOX_MATCH_THRESHOLD:.0%}).",
+                level="warning",
+            )
+
+    def _capture_textbox_template(self) -> None:
+        result = self._grab_textbox_crop()
+        if result is None:
+            return
+        crop, _ = result
+
+        _TEXTBOX_TEMPLATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        if not _cv2.imwrite(str(_TEXTBOX_TEMPLATE_PATH), crop):
+            self._show_error(f"Failed to save template to {_TEXTBOX_TEMPLATE_PATH}.")
+            return
+
+        h, w = crop.shape[:2]
+        self._set_status(
+            f"Saved textbox template ({w}×{h}px) → {_TEXTBOX_TEMPLATE_PATH}",
             level="success",
         )
 
