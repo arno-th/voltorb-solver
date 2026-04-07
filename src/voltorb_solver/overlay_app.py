@@ -1508,6 +1508,11 @@ class OverlayControlWindow(QMainWindow):
         """Stop the state machine and reset the button."""
         self._play_level_running = False
         self.play_level_btn.setText("Play Level")
+        # Restore overlays in case they were hidden during a dialog sequence.
+        if self.overlay_btn.isChecked():
+            self.x11_overlay.show()
+        if self.prob_overlay_btn.isChecked():
+            self.simple_overlay.show()
         self._set_status(reason, level)
 
     def _play_step(self) -> None:
@@ -1584,12 +1589,21 @@ class OverlayControlWindow(QMainWindow):
 
         if not has_textbox:
             self._set_status(f"  Step {step} dialog {ds}: no textbox — re-evaluating board…")
+            # Re-enable overlays now that the textbox is gone.
+            if self.overlay_btn.isChecked():
+                self.x11_overlay.show()
+            if self.prob_overlay_btn.isChecked():
+                self.simple_overlay.show()
             self._refresh_tiles()
             if self._play_level_running:
                 QTimer.singleShot(1000, self._play_step)
             return
 
         self._set_status(f"  Step {step} dialog {ds}: textbox present — checking for Game Clear…")
+        # Hide overlays while a textbox is on screen so the click lands cleanly.
+        if ds == 1:
+            self.x11_overlay.hide()
+            self.simple_overlay.hide()
         is_clear = self._play_check_template_now(
             self._get_game_clear_region()[0],
             _TEXTBOX_GAME_CLEAR_TEMPLATE_PATH,
@@ -1597,7 +1611,9 @@ class OverlayControlWindow(QMainWindow):
         )
         if is_clear:
             self._set_status("  Game Clear detected! Level complete.", "success")
-            self._play_stop("Game Clear!", "success")
+            self._play_level_running = False
+            self.play_level_btn.setText("Play Level")
+            self._set_status("Game Clear!", "success")
             return
 
         if ds >= MAX_DIALOG_STEPS:
