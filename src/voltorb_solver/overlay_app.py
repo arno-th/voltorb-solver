@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -428,10 +429,12 @@ class OverlayControlWindow(QMainWindow):
         subtitle.setWordWrap(True)
         header_layout.addWidget(subtitle)
 
-        self.status = QLabel()
-        self.status.setObjectName("StatusPill")
-        self.status.setWordWrap(True)
-        header_layout.addWidget(self.status)
+        self.log_view = QTextEdit()
+        self.log_view.setObjectName("LogView")
+        self.log_view.setReadOnly(True)
+        self.log_view.setFixedHeight(150)
+        self.log_view.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
+        header_layout.addWidget(self.log_view)
         layout.addWidget(header_card)
 
         monitor_card = QFrame()
@@ -685,14 +688,14 @@ class OverlayControlWindow(QMainWindow):
                 color: #5b7288;
             }
 
-            #StatusPill {
+            QTextEdit#LogView {
                 border-radius: 8px;
                 border: 1px solid #d1deea;
-                background: #f5f9fc;
-                color: #2f4d66;
-                padding: 8px 10px;
-                font-size: 12px;
-                font-weight: 600;
+                background: #f8fbfd;
+                color: #1a2e40;
+                padding: 6px 8px;
+                font-size: 11px;
+                font-family: monospace;
             }
 
             QComboBox#MonitorCombo {
@@ -1249,41 +1252,79 @@ class OverlayControlWindow(QMainWindow):
         MAX_ITERATIONS = 50
         MAX_TEXTBOX_CLICKS = 30
 
+        def log(msg: str, level: str = "info") -> None:
+            QTimer.singleShot(0, lambda m=msg, lv=level: self._set_status(m, lv))
+
+        textbox_tpl_exists = _TEXTBOX_TEMPLATE_PATH.exists()
+        clear_tpl_exists = _TEXTBOX_GAME_CLEAR_TEMPLATE_PATH.exists()
+        if not textbox_tpl_exists:
+            log("Warning: textbox template not found — dialog detection disabled.", "warning")
+        if not clear_tpl_exists:
+            log("Warning: game-clear template not found — level completion detection disabled.", "warning")
+
         try:
             for iteration in range(MAX_ITERATIONS):
                 if not self._play_level_running:
                     break
 
+                step = iteration + 1
+                log(f"── Step {step}: finding best tile…")
+
                 # ── 1. Find and click best tile ──────────────────────────────
                 click_info = self._play_find_best_tile()
                 if click_info is None:
-                    QTimer.singleShot(0, lambda: self._set_status(
-                        "No recommended unrevealed tile found. Level may be complete.",
-                        level="info",
-                    ))
+                    snapshot = solve_game_state(self._game_state)
+                    if snapshot.total_configurations == 0:
+                        log("No valid board configurations — solver has no solutions. Check clues.", "error")
+                    else:
+                        n_useful = len(snapshot.useful_positions)
+                        n_unrevealed = sum(
+                            1 for r in range(5) for c in range(5)
+                            if not self._game_state.board[r][c].revealed
+                        )
+                        log(
+                            f"No clickable tile found — {n_unrevealed} unrevealed, "
+                            f"{n_useful} useful positions, "
+                            f"{snapshot.total_configurations} configs. "
+                            "Level may be complete or all remaining tiles are bombs.",
+                            "info",
+                        )
                     break
 
                 tile_name, cx, cy = click_info
                 window_id = self.state.target_window_id
-                n = iteration + 1
-                QTimer.singleShot(0, lambda tn=tile_name, px=cx, py=cy, i=n: self._set_status(
-                    f"[{i}] Clicking {tn} at ({px}, {py})…", level="info",
-                ))
+
+                m = re.match(r"^\((\d),(\d)\)$", tile_name)
+                if m:
+                    snapshot = solve_game_state(self._game_state)
+                    pos = (int(m.group(1)), int(m.group(2)))
+                    bomb_prob = snapshot.bomb_probabilities.get(pos, 1.0)
+                    log(
+                        f"Step {step}: clicking {tile_name} at ({cx},{cy}) "
+                        f"[bomb prob {bomb_prob:.1%}, {snapshot.total_configurations} configs]"
+                    )
+                else:
+                    log(f"Step {step}: clicking {tile_name} at ({cx},{cy})")
+
                 self._play_do_xdotool_click(cx, cy, window_id)
+                log(f"Step {step}: click sent, waiting for game response (0.8 s)…")
                 time.sleep(0.8)
 
                 # ── 2. Textbox/dialog loop ────────────────────────────────────
                 game_clear = False
-                for _ in range(MAX_TEXTBOX_CLICKS):
+                for dialog_step in range(MAX_TEXTBOX_CLICKS):
                     if not self._play_level_running:
                         break
 
+                    log(f"  Dialog check {dialog_step + 1}: checking for textbox…")
                     has_textbox = self._play_check_template_sync(
                         _TEXTBOX_REGION, _TEXTBOX_TEMPLATE_PATH, _TEXTBOX_MATCH_THRESHOLD,
                     )
                     if not has_textbox:
+                        log("  No textbox detected — proceeding to board re-eval.")
                         break
 
+                    log("  Textbox present — checking for Game Clear…")
                     is_clear = self._play_check_template_sync(
                         _TEXTBOX_GAME_CLEAR_REGION,
                         _TEXTBOX_GAME_CLEAR_TEMPLATE_PATH,
@@ -1291,12 +1332,10 @@ class OverlayControlWindow(QMainWindow):
                     )
                     if is_clear:
                         game_clear = True
-                        QTimer.singleShot(0, lambda: self._set_status(
-                            "Game Clear! Level complete.", level="success",
-                        ))
+                        log("  Game Clear detected! Level complete.", "success")
                         break
 
-                    # Not game clear — click to advance the dialog, then recheck.
+                    log(f"  Not game clear — clicking to advance dialog ({dialog_step + 1})…")
                     self._play_click_game_center()
                     time.sleep(0.5)
 
@@ -1304,6 +1343,7 @@ class OverlayControlWindow(QMainWindow):
                     break
 
                 # ── 3. Re-evaluate board state ───────────────────────────────
+                log(f"Step {step}: re-evaluating board state…")
                 done_event = threading.Event()
 
                 def _do_refresh(_ev=done_event):
@@ -1313,11 +1353,16 @@ class OverlayControlWindow(QMainWindow):
                         _ev.set()
 
                 QTimer.singleShot(0, _do_refresh)
-                done_event.wait(timeout=10.0)
+                timed_out = not done_event.wait(timeout=10.0)
+                if timed_out:
+                    log("  Board refresh timed out — stopping.", "error")
+                    break
+                log(f"Step {step}: board refreshed, looping to next move.")
                 time.sleep(0.2)
         finally:
             self._play_level_running = False
             QTimer.singleShot(0, lambda: self.play_level_btn.setText("Play Level"))
+            log("Play Level loop ended.")
 
     def _play_find_best_tile(self) -> tuple[str, int, int] | None:
         """Return (tile_name, screen_cx, screen_cy) for the safest useful tile, or None."""
@@ -1489,18 +1534,19 @@ class OverlayControlWindow(QMainWindow):
             self.simple_overlay.show()
 
     def _set_status(self, message: str, level: str = "info") -> None:
-        style_map = {
-            "info": ("#f5f9fc", "#d1deea", "#2f4d66"),
-            "success": ("#edf8f1", "#bfe1cd", "#24553a"),
-            "warning": ("#fff8eb", "#efd7a6", "#6f5315"),
-            "error": ("#fdeeee", "#e6b6b6", "#7c2d2d"),
+        color_map = {
+            "info":    "#2f4d66",
+            "success": "#1a6b3a",
+            "warning": "#7a5a00",
+            "error":   "#8b1a1a",
         }
-        bg, border, fg = style_map.get(level, style_map["info"])
-        self.status.setStyleSheet(
-            f"border-radius: 8px; border: 1px solid {border}; background: {bg}; color: {fg};"
-            "padding: 8px 10px; font-size: 12px; font-weight: 600;"
-        )
-        self.status.setText(message)
+        fg = color_map.get(level, color_map["info"])
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        safe_msg = message.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        html = f'<span style="color:{fg};">[{timestamp}] {safe_msg}</span>'
+        self.log_view.append(html)
+        sb = self.log_view.verticalScrollBar()
+        sb.setValue(sb.maximum())
 
     def _update_monitor_hint(self) -> None:
         screen = self._get_selected_screen()
