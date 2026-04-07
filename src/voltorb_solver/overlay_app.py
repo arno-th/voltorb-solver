@@ -1605,7 +1605,7 @@ class OverlayControlWindow(QMainWindow):
             return
 
         self._set_status(f"  Step {step} dialog {ds}: not game clear — advancing dialog…")
-        self._play_click_game_center()
+        self._play_click_textbox_center()
         QTimer.singleShot(500, self._play_check_dialog_step)
 
     def _play_check_template_now(
@@ -1705,6 +1705,33 @@ class OverlayControlWindow(QMainWindow):
             subprocess.run(["xdotool", "mouseup", "--clearmodifiers", "1"], check=False, capture_output=True)
         except Exception:
             pass
+
+    def _play_click_textbox_center(self) -> None:
+        """Click the centre of the textbox region to advance a dialog box."""
+        region, _ = self._get_textbox_region()
+        l_f, t_f, r_f, b_f = region
+
+        mapping_rect = self._mapping_rect_for_signature(self._last_capture_signature)
+        if mapping_rect is not None:
+            gx, gy, gw, gh = (
+                mapping_rect.x(), mapping_rect.y(),
+                mapping_rect.width(), mapping_rect.height(),
+            )
+        else:
+            screen = self._get_selected_screen()
+            if screen is None:
+                return
+            geo = screen.geometry()
+            if self._last_image_size:
+                mr = _map_image_to_overlay(geo.width(), geo.height(), *self._last_image_size)
+                mr.translate(geo.x(), geo.y())
+                gx, gy, gw, gh = mr.x(), mr.y(), mr.width(), mr.height()
+            else:
+                gx, gy, gw, gh = geo.x(), geo.y(), geo.width(), geo.height()
+
+        cx = gx + int(gw * (l_f + r_f) / 2)
+        cy = gy + int(gh * (t_f + b_f) / 2)
+        self._play_do_xdotool_click(cx, cy, self.state.target_window_id)
 
     def _play_click_game_center(self) -> None:
         """Click the centre of the game area to advance a dialog box."""
