@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QDoubleSpinBox,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -59,9 +60,17 @@ OVERLAY_COLORS = [
 
 # Regions of the captured frame used for post-click text-box checks.
 # (left_frac, top_frac, right_frac, bottom_frac) relative to the game area.
+# Used as a fallback when no board has been parsed yet.
 _TEXTBOX_REGION = (0.07, 0.974, 0.10, 0.993)
 _TEXTBOX_TEMPLATE_PATH = Path("assets/templates/textbox_indicator.png")
 _TEXTBOX_MATCH_THRESHOLD = 0.90
+
+# Textbox indicator position as multiples of tile size, relative to board edges.
+# The indicator sits just below the board's bottom row, offset from the board's left edge.
+_TEXTBOX_BOARD_LEFT_TILES = 0.40
+_TEXTBOX_BOARD_RIGHT_TILES = 0.65
+_TEXTBOX_BOARD_TOP_TILES = 0.12
+_TEXTBOX_BOARD_BOTTOM_TILES = 0.36
 
 _TEXTBOX_GAME_CLEAR_REGION = (0.07, 0.9, 0.2, 0.935)
 _TEXTBOX_GAME_CLEAR_TEMPLATE_PATH = Path("assets/templates/textbox_game_clear.png")
@@ -411,6 +420,13 @@ class OverlayControlWindow(QMainWindow):
         self._play_dialog_steps = 0
         self._play_click_done.connect(self._play_after_click)
 
+        self._textbox_offsets_path = Path("assets/templates/textbox_offsets.json")
+        self._textbox_left_tiles = _TEXTBOX_BOARD_LEFT_TILES
+        self._textbox_right_tiles = _TEXTBOX_BOARD_RIGHT_TILES
+        self._textbox_top_tiles = _TEXTBOX_BOARD_TOP_TILES
+        self._textbox_bottom_tiles = _TEXTBOX_BOARD_BOTTOM_TILES
+        self._load_textbox_offsets()
+
         root = QWidget()
         root.setObjectName("RootPanel")
         self.setCentralWidget(root)
@@ -637,6 +653,36 @@ class OverlayControlWindow(QMainWindow):
         textbox_row.addWidget(self.show_textbox_region_btn)
         textbox_row.addStretch(1)
         debug_content_layout.addLayout(textbox_row)
+
+        # Board-relative offset controls for Textbox 1
+        offsets_row = QHBoxLayout()
+        offsets_row.setSpacing(6)
+        for attr, label_text in (
+            ("textbox_left_spin", "L:"),
+            ("textbox_right_spin", "R:"),
+            ("textbox_top_spin", "T:"),
+            ("textbox_bottom_spin", "B:"),
+        ):
+            lbl = QLabel(label_text)
+            lbl.setObjectName("FieldLabel")
+            offsets_row.addWidget(lbl)
+            spin = QDoubleSpinBox()
+            spin.setRange(-5.0, 30.0)
+            spin.setSingleStep(0.05)
+            spin.setDecimals(2)
+            spin.setFixedWidth(68)
+            spin.setToolTip("Tile-widths/heights from the board edge (board-relative offset)")
+            setattr(self, attr, spin)
+            offsets_row.addWidget(spin)
+        offsets_row.addStretch(1)
+        self.textbox_left_spin.setValue(self._textbox_left_tiles)
+        self.textbox_right_spin.setValue(self._textbox_right_tiles)
+        self.textbox_top_spin.setValue(self._textbox_top_tiles)
+        self.textbox_bottom_spin.setValue(self._textbox_bottom_tiles)
+        for spin in (self.textbox_left_spin, self.textbox_right_spin,
+                     self.textbox_top_spin, self.textbox_bottom_spin):
+            spin.valueChanged.connect(self._on_textbox_offsets_changed)
+        debug_content_layout.addLayout(offsets_row)
 
         textbox_game_clear_label = QLabel("Game Clear Text-box")
         textbox_game_clear_label.setObjectName("FieldLabel")
@@ -962,14 +1008,14 @@ class OverlayControlWindow(QMainWindow):
         QTimer.singleShot(4000, _hide)
 
     def _show_textbox_region_overlay(self) -> None:
-        self._show_textbox_region_overlay_for(_TEXTBOX_REGION, QColor(255, 80, 200), "Textbox 1")
+        self._show_textbox_region_overlay_for(self._get_textbox_region(), QColor(255, 80, 200), "Textbox 1")
 
     def _show_textbox_game_clear_region_overlay(self) -> None:
         self._show_textbox_region_overlay_for(_TEXTBOX_GAME_CLEAR_REGION, QColor(80, 200, 255), "Game Clear")
 
     # ── Text-box detection ───────────────────────────────────────────────────
 
-    def _grab_textbox_crop(self, region: tuple[float, float, float, float]) -> tuple["np.ndarray", str] | None:  # type: ignore[name-defined]
+    def _grab_textbox_crop(self, region: tuple[float, float, float, float]) -> tuple["np.ndarray", str, tuple[int, int, int, int], tuple[int, int]] | None:  # type: ignore[name-defined]
         """Capture the game window and return the textbox crop (numpy array) + temp path."""
         if _cv2 is None:
             self._show_error("OpenCV (cv2) is required for text-box detection.")
@@ -1042,7 +1088,7 @@ class OverlayControlWindow(QMainWindow):
             )
             return None
 
-        return crop, tmp_path
+        return crop, tmp_path, (x0, y0, x1, y1), (img_w, img_h)
 
     def _check_textbox_template_for(
         self,
@@ -1058,7 +1104,7 @@ class OverlayControlWindow(QMainWindow):
         result = self._grab_textbox_crop(region)
         if result is None:
             return
-        crop, _ = result
+        crop, _, (cx0, cy0, cx1, cy1), (iw, ih) = result
 
         if not template_path.exists():
             self._set_status(
@@ -1107,7 +1153,17 @@ class OverlayControlWindow(QMainWindow):
         result = self._grab_textbox_crop(region)
         if result is None:
             return
-        crop, _ = result
+        crop, full_screenshot_path, (cx0, cy0, cx1, cy1), (iw, ih) = result
+
+        # Save the full screenshot for debugging alongside the template.
+        debug_screenshot_path = template_path.with_suffix(".debug_capture.png")
+        import shutil as _shutil
+        try:
+            _shutil.copy2(full_screenshot_path, str(debug_screenshot_path))
+        except Exception:
+            pass
+
+        is_black = int(crop.max()) == 0 if crop.size > 0 else True
 
         template_path.parent.mkdir(parents=True, exist_ok=True)
         if not _cv2.imwrite(str(template_path), crop):
@@ -1115,16 +1171,80 @@ class OverlayControlWindow(QMainWindow):
             return
 
         h, w = crop.shape[:2]
+        black_warning = " \u26a0 Crop is all-black — wrong region or textbox not visible?" if is_black else ""
         self._set_status(
-            f"Saved {label} template ({w}\u00d7{h}px) \u2192 {template_path}",
-            level="success",
+            f"Saved {label} ({w}\u00d7{h}px) crop=({cx0},{cy0})-({cx1},{cy1}) image={iw}\u00d7{ih}"
+            f" \u2192 {template_path}{black_warning}",
+            level="warning" if is_black else "success",
         )
 
+    def _load_textbox_offsets(self) -> None:
+        """Load board-relative textbox offsets from JSON; silently ignore missing file."""
+        import json
+        if not self._textbox_offsets_path.exists():
+            return
+        try:
+            data = json.loads(self._textbox_offsets_path.read_text())
+            self._textbox_left_tiles = float(data.get("left", self._textbox_left_tiles))
+            self._textbox_right_tiles = float(data.get("right", self._textbox_right_tiles))
+            self._textbox_top_tiles = float(data.get("top", self._textbox_top_tiles))
+            self._textbox_bottom_tiles = float(data.get("bottom", self._textbox_bottom_tiles))
+        except Exception:
+            pass
+
+    def _save_textbox_offsets(self) -> None:
+        """Persist current board-relative textbox offsets to JSON."""
+        import json
+        self._textbox_offsets_path.parent.mkdir(parents=True, exist_ok=True)
+        data = {
+            "left": self._textbox_left_tiles,
+            "right": self._textbox_right_tiles,
+            "top": self._textbox_top_tiles,
+            "bottom": self._textbox_bottom_tiles,
+        }
+        self._textbox_offsets_path.write_text(json.dumps(data, indent=2))
+
+    def _on_textbox_offsets_changed(self) -> None:
+        self._textbox_left_tiles = self.textbox_left_spin.value()
+        self._textbox_right_tiles = self.textbox_right_spin.value()
+        self._textbox_top_tiles = self.textbox_top_spin.value()
+        self._textbox_bottom_tiles = self.textbox_bottom_spin.value()
+        self._save_textbox_offsets()
+
+    def _get_textbox_region(self) -> tuple[float, float, float, float]:
+        """Return the textbox indicator region, positioned relative to the detected board
+        if tile regions are available, otherwise fall back to the hardcoded constant."""
+        tile_regions = [r for r in self._last_parse_regions if self._is_tile_region(r.name)]
+        if not tile_regions or self._last_image_size is None:
+            return _TEXTBOX_REGION
+        img_w, img_h = self._last_image_size
+        if img_w <= 0 or img_h <= 0:
+            return _TEXTBOX_REGION
+
+        board_left = min(r.x for r in tile_regions)
+        board_bottom = max(r.y + r.h for r in tile_regions)
+        tile_ws = sorted(r.w for r in tile_regions)
+        tile_hs = sorted(r.h for r in tile_regions)
+        tile_w = tile_ws[len(tile_ws) // 2]
+        tile_h = tile_hs[len(tile_hs) // 2]
+
+        x0 = board_left + int(self._textbox_left_tiles * tile_w)
+        x1 = board_left + int(self._textbox_right_tiles * tile_w)
+        y0 = board_bottom + int(self._textbox_top_tiles * tile_h)
+        y1 = board_bottom + int(self._textbox_bottom_tiles * tile_h)
+
+        x0 = max(0, min(x0, img_w - 1))
+        x1 = max(x0 + 1, min(x1, img_w))
+        y0 = max(0, min(y0, img_h - 1))
+        y1 = max(y0 + 1, min(y1, img_h))
+
+        return (x0 / img_w, y0 / img_h, x1 / img_w, y1 / img_h)
+
     def _check_textbox_template(self) -> None:
-        self._check_textbox_template_for(_TEXTBOX_REGION, _TEXTBOX_TEMPLATE_PATH, _TEXTBOX_MATCH_THRESHOLD, "Textbox 1")
+        self._check_textbox_template_for(self._get_textbox_region(), _TEXTBOX_TEMPLATE_PATH, _TEXTBOX_MATCH_THRESHOLD, "Textbox 1")
 
     def _capture_textbox_template(self) -> None:
-        self._capture_textbox_template_for(_TEXTBOX_REGION, _TEXTBOX_TEMPLATE_PATH, "Textbox 1")
+        self._capture_textbox_template_for(self._get_textbox_region(), _TEXTBOX_TEMPLATE_PATH, "Textbox 1")
 
     def _check_textbox_game_clear_template(self) -> None:
         self._check_textbox_template_for(_TEXTBOX_GAME_CLEAR_REGION, _TEXTBOX_GAME_CLEAR_TEMPLATE_PATH, _TEXTBOX_GAME_CLEAR_MATCH_THRESHOLD, "Game Clear")
@@ -1363,7 +1483,7 @@ class OverlayControlWindow(QMainWindow):
 
         self._set_status(f"  Step {step} dialog {ds}: checking for textbox…")
         has_textbox = self._play_check_template_now(
-            _TEXTBOX_REGION, _TEXTBOX_TEMPLATE_PATH, _TEXTBOX_MATCH_THRESHOLD,
+            self._get_textbox_region(), _TEXTBOX_TEMPLATE_PATH, _TEXTBOX_MATCH_THRESHOLD,
         )
 
         if not has_textbox:
@@ -1405,7 +1525,7 @@ class OverlayControlWindow(QMainWindow):
         result = self._grab_textbox_crop(region)
         if result is None:
             return False
-        crop, _ = result
+        crop, *_ = result
 
         template = _cv2.imread(str(template_path))
         if template is None:
