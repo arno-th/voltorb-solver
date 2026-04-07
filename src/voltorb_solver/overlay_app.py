@@ -76,6 +76,12 @@ _TEXTBOX_GAME_CLEAR_REGION = (0.07, 0.9, 0.2, 0.935)
 _TEXTBOX_GAME_CLEAR_TEMPLATE_PATH = Path("assets/templates/textbox_game_clear.png")
 _TEXTBOX_GAME_CLEAR_MATCH_THRESHOLD = 0.90
 
+# Game-clear textbox board-relative defaults (tile units from board edge).
+_TEXTBOX_GAME_CLEAR_BOARD_LEFT_TILES = 0.07
+_TEXTBOX_GAME_CLEAR_BOARD_RIGHT_TILES = 2.0
+_TEXTBOX_GAME_CLEAR_BOARD_TOP_TILES = -1.0
+_TEXTBOX_GAME_CLEAR_BOARD_BOTTOM_TILES = -0.35
+
 
 def _bind_widget_to_screen(widget: QWidget, screen) -> None:
     if screen is None:
@@ -425,6 +431,10 @@ class OverlayControlWindow(QMainWindow):
         self._textbox_right_tiles = _TEXTBOX_BOARD_RIGHT_TILES
         self._textbox_top_tiles = _TEXTBOX_BOARD_TOP_TILES
         self._textbox_bottom_tiles = _TEXTBOX_BOARD_BOTTOM_TILES
+        self._game_clear_left_tiles = _TEXTBOX_GAME_CLEAR_BOARD_LEFT_TILES
+        self._game_clear_right_tiles = _TEXTBOX_GAME_CLEAR_BOARD_RIGHT_TILES
+        self._game_clear_top_tiles = _TEXTBOX_GAME_CLEAR_BOARD_TOP_TILES
+        self._game_clear_bottom_tiles = _TEXTBOX_GAME_CLEAR_BOARD_BOTTOM_TILES
         self._load_textbox_offsets()
 
         root = QWidget()
@@ -705,6 +715,36 @@ class OverlayControlWindow(QMainWindow):
         textbox_game_clear_row.addStretch(1)
         debug_content_layout.addLayout(textbox_game_clear_row)
 
+        # Board-relative offset controls for Game Clear
+        gc_offsets_row = QHBoxLayout()
+        gc_offsets_row.setSpacing(6)
+        for attr, label_text in (
+            ("game_clear_left_spin", "L:"),
+            ("game_clear_right_spin", "R:"),
+            ("game_clear_top_spin", "T:"),
+            ("game_clear_bottom_spin", "B:"),
+        ):
+            lbl = QLabel(label_text)
+            lbl.setObjectName("FieldLabel")
+            gc_offsets_row.addWidget(lbl)
+            spin = QDoubleSpinBox()
+            spin.setRange(-5.0, 30.0)
+            spin.setSingleStep(0.05)
+            spin.setDecimals(2)
+            spin.setFixedWidth(68)
+            spin.setToolTip("Tile-widths/heights from the board edge (board-relative offset)")
+            setattr(self, attr, spin)
+            gc_offsets_row.addWidget(spin)
+        gc_offsets_row.addStretch(1)
+        self.game_clear_left_spin.setValue(self._game_clear_left_tiles)
+        self.game_clear_right_spin.setValue(self._game_clear_right_tiles)
+        self.game_clear_top_spin.setValue(self._game_clear_top_tiles)
+        self.game_clear_bottom_spin.setValue(self._game_clear_bottom_tiles)
+        for spin in (self.game_clear_left_spin, self.game_clear_right_spin,
+                     self.game_clear_top_spin, self.game_clear_bottom_spin):
+            spin.valueChanged.connect(self._on_game_clear_offsets_changed)
+        debug_content_layout.addLayout(gc_offsets_row)
+
         self.debug_content.setVisible(False)
         debug_card_layout.addWidget(self.debug_content)
         layout.addWidget(debug_card)
@@ -961,6 +1001,7 @@ class OverlayControlWindow(QMainWindow):
         region: tuple[float, float, float, float],
         color: QColor,
         label: str,
+        is_fallback: bool = False,
     ) -> None:
         screen = self._get_selected_screen()
         if screen is None:
@@ -989,15 +1030,22 @@ class OverlayControlWindow(QMainWindow):
         rh = max(1, int(gh * (b_f - t_f)))
         region_rect = QRect(rx, ry, rw, rh)
 
+        # Image-local coords (comparable to crop=(cx0,cy0)-(cx1,cy1) in capture status).
+        img_x0 = int(gw * l_f)
+        img_y0 = int(gh * t_f)
+        img_x1 = img_x0 + rw
+        img_y1 = img_y0 + rh
+
         segments: list[OverlayBorderWindow] = []
         for side in ("top", "bottom", "left", "right"):
             seg = OverlayBorderWindow(color, thickness=3)
             seg.show_for_rect(region_rect, side, screen=screen)
             segments.append(seg)
 
+        fallback_note = " \u26a0 Fallback region \u2014 run \u2018Label/relabel\u2019 to enable board-relative offsets." if is_fallback else ""
         self._set_status(
-            f"{label}: ({rx},{ry}) {rw}\u00d7{rh}px \u2014 overlay visible for 4 s.",
-            level="info",
+            f"{label}: screen=({rx},{ry}) image-local=({img_x0},{img_y0})\u2013({img_x1},{img_y1}) {rw}\u00d7{rh}px{fallback_note}",
+            level="warning" if is_fallback else "info",
         )
 
         def _hide() -> None:
@@ -1008,10 +1056,12 @@ class OverlayControlWindow(QMainWindow):
         QTimer.singleShot(4000, _hide)
 
     def _show_textbox_region_overlay(self) -> None:
-        self._show_textbox_region_overlay_for(self._get_textbox_region(), QColor(255, 80, 200), "Textbox 1")
+        region, is_fallback = self._get_textbox_region()
+        self._show_textbox_region_overlay_for(region, QColor(255, 80, 200), "Textbox 1", is_fallback)
 
     def _show_textbox_game_clear_region_overlay(self) -> None:
-        self._show_textbox_region_overlay_for(_TEXTBOX_GAME_CLEAR_REGION, QColor(80, 200, 255), "Game Clear")
+        region, is_fallback = self._get_game_clear_region()
+        self._show_textbox_region_overlay_for(region, QColor(80, 200, 255), "Game Clear", is_fallback)
 
     # ── Text-box detection ───────────────────────────────────────────────────
 
@@ -1189,6 +1239,10 @@ class OverlayControlWindow(QMainWindow):
             self._textbox_right_tiles = float(data.get("right", self._textbox_right_tiles))
             self._textbox_top_tiles = float(data.get("top", self._textbox_top_tiles))
             self._textbox_bottom_tiles = float(data.get("bottom", self._textbox_bottom_tiles))
+            self._game_clear_left_tiles = float(data.get("gc_left", self._game_clear_left_tiles))
+            self._game_clear_right_tiles = float(data.get("gc_right", self._game_clear_right_tiles))
+            self._game_clear_top_tiles = float(data.get("gc_top", self._game_clear_top_tiles))
+            self._game_clear_bottom_tiles = float(data.get("gc_bottom", self._game_clear_bottom_tiles))
         except Exception:
             pass
 
@@ -1201,6 +1255,10 @@ class OverlayControlWindow(QMainWindow):
             "right": self._textbox_right_tiles,
             "top": self._textbox_top_tiles,
             "bottom": self._textbox_bottom_tiles,
+            "gc_left": self._game_clear_left_tiles,
+            "gc_right": self._game_clear_right_tiles,
+            "gc_top": self._game_clear_top_tiles,
+            "gc_bottom": self._game_clear_bottom_tiles,
         }
         self._textbox_offsets_path.write_text(json.dumps(data, indent=2))
 
@@ -1211,15 +1269,21 @@ class OverlayControlWindow(QMainWindow):
         self._textbox_bottom_tiles = self.textbox_bottom_spin.value()
         self._save_textbox_offsets()
 
-    def _get_textbox_region(self) -> tuple[float, float, float, float]:
-        """Return the textbox indicator region, positioned relative to the detected board
-        if tile regions are available, otherwise fall back to the hardcoded constant."""
+    def _on_game_clear_offsets_changed(self) -> None:
+        self._game_clear_left_tiles = self.game_clear_left_spin.value()
+        self._game_clear_right_tiles = self.game_clear_right_spin.value()
+        self._game_clear_top_tiles = self.game_clear_top_spin.value()
+        self._game_clear_bottom_tiles = self.game_clear_bottom_spin.value()
+        self._save_textbox_offsets()
+
+    def _get_textbox_region(self) -> tuple[tuple[float, float, float, float], bool]:
+        """Return (region, is_fallback). Falls back to hardcoded constant when no board parsed."""
         tile_regions = [r for r in self._last_parse_regions if self._is_tile_region(r.name)]
         if not tile_regions or self._last_image_size is None:
-            return _TEXTBOX_REGION
+            return _TEXTBOX_REGION, True
         img_w, img_h = self._last_image_size
         if img_w <= 0 or img_h <= 0:
-            return _TEXTBOX_REGION
+            return _TEXTBOX_REGION, True
 
         board_left = min(r.x for r in tile_regions)
         board_bottom = max(r.y + r.h for r in tile_regions)
@@ -1238,19 +1302,51 @@ class OverlayControlWindow(QMainWindow):
         y0 = max(0, min(y0, img_h - 1))
         y1 = max(y0 + 1, min(y1, img_h))
 
-        return (x0 / img_w, y0 / img_h, x1 / img_w, y1 / img_h)
+        return (x0 / img_w, y0 / img_h, x1 / img_w, y1 / img_h), False
+
+    def _get_game_clear_region(self) -> tuple[tuple[float, float, float, float], bool]:
+        """Return (region, is_fallback). Falls back to hardcoded constant when no board parsed."""
+        tile_regions = [r for r in self._last_parse_regions if self._is_tile_region(r.name)]
+        if not tile_regions or self._last_image_size is None:
+            return _TEXTBOX_GAME_CLEAR_REGION, True
+        img_w, img_h = self._last_image_size
+        if img_w <= 0 or img_h <= 0:
+            return _TEXTBOX_GAME_CLEAR_REGION, True
+
+        board_left = min(r.x for r in tile_regions)
+        board_bottom = max(r.y + r.h for r in tile_regions)
+        tile_ws = sorted(r.w for r in tile_regions)
+        tile_hs = sorted(r.h for r in tile_regions)
+        tile_w = tile_ws[len(tile_ws) // 2]
+        tile_h = tile_hs[len(tile_hs) // 2]
+
+        x0 = board_left + int(self._game_clear_left_tiles * tile_w)
+        x1 = board_left + int(self._game_clear_right_tiles * tile_w)
+        y0 = board_bottom + int(self._game_clear_top_tiles * tile_h)
+        y1 = board_bottom + int(self._game_clear_bottom_tiles * tile_h)
+
+        x0 = max(0, min(x0, img_w - 1))
+        x1 = max(x0 + 1, min(x1, img_w))
+        y0 = max(0, min(y0, img_h - 1))
+        y1 = max(y0 + 1, min(y1, img_h))
+
+        return (x0 / img_w, y0 / img_h, x1 / img_w, y1 / img_h), False
 
     def _check_textbox_template(self) -> None:
-        self._check_textbox_template_for(self._get_textbox_region(), _TEXTBOX_TEMPLATE_PATH, _TEXTBOX_MATCH_THRESHOLD, "Textbox 1")
+        region, _ = self._get_textbox_region()
+        self._check_textbox_template_for(region, _TEXTBOX_TEMPLATE_PATH, _TEXTBOX_MATCH_THRESHOLD, "Textbox 1")
 
     def _capture_textbox_template(self) -> None:
-        self._capture_textbox_template_for(self._get_textbox_region(), _TEXTBOX_TEMPLATE_PATH, "Textbox 1")
+        region, _ = self._get_textbox_region()
+        self._capture_textbox_template_for(region, _TEXTBOX_TEMPLATE_PATH, "Textbox 1")
 
     def _check_textbox_game_clear_template(self) -> None:
-        self._check_textbox_template_for(_TEXTBOX_GAME_CLEAR_REGION, _TEXTBOX_GAME_CLEAR_TEMPLATE_PATH, _TEXTBOX_GAME_CLEAR_MATCH_THRESHOLD, "Game Clear")
+        region, _ = self._get_game_clear_region()
+        self._check_textbox_template_for(region, _TEXTBOX_GAME_CLEAR_TEMPLATE_PATH, _TEXTBOX_GAME_CLEAR_MATCH_THRESHOLD, "Game Clear")
 
     def _capture_textbox_game_clear_template(self) -> None:
-        self._capture_textbox_template_for(_TEXTBOX_GAME_CLEAR_REGION, _TEXTBOX_GAME_CLEAR_TEMPLATE_PATH, "Game Clear")
+        region, _ = self._get_game_clear_region()
+        self._capture_textbox_template_for(region, _TEXTBOX_GAME_CLEAR_TEMPLATE_PATH, "Game Clear")
 
     def _start_game(self) -> None:
         if self.state.target_window_id is None:
@@ -1483,7 +1579,7 @@ class OverlayControlWindow(QMainWindow):
 
         self._set_status(f"  Step {step} dialog {ds}: checking for textbox…")
         has_textbox = self._play_check_template_now(
-            self._get_textbox_region(), _TEXTBOX_TEMPLATE_PATH, _TEXTBOX_MATCH_THRESHOLD,
+            self._get_textbox_region()[0], _TEXTBOX_TEMPLATE_PATH, _TEXTBOX_MATCH_THRESHOLD,
         )
 
         if not has_textbox:
@@ -1495,7 +1591,7 @@ class OverlayControlWindow(QMainWindow):
 
         self._set_status(f"  Step {step} dialog {ds}: textbox present — checking for Game Clear…")
         is_clear = self._play_check_template_now(
-            _TEXTBOX_GAME_CLEAR_REGION,
+            self._get_game_clear_region()[0],
             _TEXTBOX_GAME_CLEAR_TEMPLATE_PATH,
             _TEXTBOX_GAME_CLEAR_MATCH_THRESHOLD,
         )
