@@ -10,7 +10,7 @@ import threading
 import time
 from tempfile import gettempdir
 
-from PySide6.QtCore import Qt, QRect, QTimer
+from PySide6.QtCore import Qt, QRect, QTimer, Signal
 from PySide6.QtGui import QColor, QGuiApplication, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -382,6 +382,9 @@ class X11SafeOverlay:
 
 
 class OverlayControlWindow(QMainWindow):
+    # Emitted from background thread once the xdotool click subprocess finishes.
+    _play_click_done = Signal()
+
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Voltorb Solver X11 Overlay")
@@ -403,6 +406,9 @@ class OverlayControlWindow(QMainWindow):
         self._tile_parsed_values: dict[str, int | None] = {}
         self._game_state = GameState()
         self._play_level_running = False
+        self._play_iteration = 0
+        self._play_dialog_steps = 0
+        self._play_click_done.connect(self._play_after_click)
 
         root = QWidget()
         root.setObjectName("RootPanel")
@@ -1221,14 +1227,18 @@ class OverlayControlWindow(QMainWindow):
         )
         threading.Thread(target=_do_click, daemon=True).start()
 
-    # ── Play Level ───────────────────────────────────────────────────────────
+    # ── Play Level (main-thread state machine) ─────────────────────────────
+    #
+    # All Qt / screen-capture operations stay on the main thread.
+    # The only background thread is the xdotool subprocess; when it finishes
+    # it emits _play_click_done which is connected to _play_after_click on the
+    # main thread.  This avoids the QTimer-from-background-thread pitfall where
+    # singleShot callbacks are posted to a non-existent event loop.
 
     def _play_level(self) -> None:
-        """Toggle automated level play: click best tile, handle dialogs, repeat."""
+        """Toggle automated level play."""
         if self._play_level_running:
-            self._play_level_running = False
-            self.play_level_btn.setText("Play Level")
-            self._set_status("Play Level stopped.", level="info")
+            self._play_stop("Play Level stopped by user.")
             return
 
         if self._last_capture_signature is None or self._last_image_size is None:
@@ -1237,132 +1247,161 @@ class OverlayControlWindow(QMainWindow):
         if shutil.which("xdotool") is None:
             self._show_error("`xdotool` not found. Install xdotool to use Play Level.")
             return
-        tile_regions = [r for r in self._last_parse_regions if self._is_tile_region(r.name)]
-        if not tile_regions:
+        if not [r for r in self._last_parse_regions if self._is_tile_region(r.name)]:
             self._show_error("No tile regions found. Run 'Start Game' first.")
             return
 
         self._play_level_running = True
+        self._play_iteration = 0
+        self._play_dialog_steps = 0
         self.play_level_btn.setText("Stop Play")
-        self._set_status("Play Level started…", level="info")
-        threading.Thread(target=self._play_level_loop, daemon=True).start()
 
-    def _play_level_loop(self) -> None:
-        """Background thread: click best tile → handle textbox dialogs → re-eval → repeat."""
-        MAX_ITERATIONS = 50
-        MAX_TEXTBOX_CLICKS = 30
+        if not _TEXTBOX_TEMPLATE_PATH.exists():
+            self._set_status("Warning: textbox template not found — dialog detection disabled.", "warning")
+        if not _TEXTBOX_GAME_CLEAR_TEMPLATE_PATH.exists():
+            self._set_status("Warning: game-clear template not found — completion detection disabled.", "warning")
 
-        def log(msg: str, level: str = "info") -> None:
-            QTimer.singleShot(0, lambda m=msg, lv=level: self._set_status(m, lv))
+        self._set_status("Play Level started…", "info")
+        QTimer.singleShot(0, self._play_step)
 
-        textbox_tpl_exists = _TEXTBOX_TEMPLATE_PATH.exists()
-        clear_tpl_exists = _TEXTBOX_GAME_CLEAR_TEMPLATE_PATH.exists()
-        if not textbox_tpl_exists:
-            log("Warning: textbox template not found — dialog detection disabled.", "warning")
-        if not clear_tpl_exists:
-            log("Warning: game-clear template not found — level completion detection disabled.", "warning")
+    def _play_stop(self, reason: str = "Play Level complete.", level: str = "info") -> None:
+        """Stop the state machine and reset the button."""
+        self._play_level_running = False
+        self.play_level_btn.setText("Play Level")
+        self._set_status(reason, level)
 
-        try:
-            for iteration in range(MAX_ITERATIONS):
-                if not self._play_level_running:
-                    break
+    def _play_step(self) -> None:
+        """Main-thread: find best tile and dispatch xdotool click to background thread."""
+        if not self._play_level_running:
+            return
 
-                step = iteration + 1
-                log(f"── Step {step}: finding best tile…")
+        self._play_iteration += 1
+        step = self._play_iteration
+        self._set_status(f"── Step {step}: finding best tile…")
 
-                # ── 1. Find and click best tile ──────────────────────────────
-                click_info = self._play_find_best_tile()
-                if click_info is None:
-                    snapshot = solve_game_state(self._game_state)
-                    if snapshot.total_configurations == 0:
-                        log("No valid board configurations — solver has no solutions. Check clues.", "error")
-                    else:
-                        n_useful = len(snapshot.useful_positions)
-                        n_unrevealed = sum(
-                            1 for r in range(5) for c in range(5)
-                            if not self._game_state.board[r][c].revealed
-                        )
-                        log(
-                            f"No clickable tile found — {n_unrevealed} unrevealed, "
-                            f"{n_useful} useful positions, "
-                            f"{snapshot.total_configurations} configs. "
-                            "Level may be complete or all remaining tiles are bombs.",
-                            "info",
-                        )
-                    break
+        click_info = self._play_find_best_tile()
+        if click_info is None:
+            snapshot = solve_game_state(self._game_state)
+            if snapshot.total_configurations == 0:
+                self._play_stop("No valid board configurations — solver has no solutions. Check clues.", "error")
+            else:
+                n_useful = len(snapshot.useful_positions)
+                n_unrevealed = sum(
+                    1 for r in range(5) for c in range(5)
+                    if not self._game_state.board[r][c].revealed
+                )
+                self._play_stop(
+                    f"No clickable tile — {n_unrevealed} unrevealed, {n_useful} useful, "
+                    f"{snapshot.total_configurations} configs. "
+                    "Level may be complete or all remaining tiles are bombs."
+                )
+            return
 
-                tile_name, cx, cy = click_info
-                window_id = self.state.target_window_id
+        tile_name, cx, cy = click_info
+        m = re.match(r"^\((\d),(\d)\)$", tile_name)
+        if m:
+            snapshot = solve_game_state(self._game_state)
+            pos = (int(m.group(1)), int(m.group(2)))
+            bomb_prob = snapshot.bomb_probabilities.get(pos, 1.0)
+            self._set_status(
+                f"Step {step}: clicking {tile_name} at ({cx},{cy}) "
+                f"[bomb prob {bomb_prob:.1%}, {snapshot.total_configurations} configs]"
+            )
+        else:
+            self._set_status(f"Step {step}: clicking {tile_name} at ({cx},{cy})")
 
-                m = re.match(r"^\((\d),(\d)\)$", tile_name)
-                if m:
-                    snapshot = solve_game_state(self._game_state)
-                    pos = (int(m.group(1)), int(m.group(2)))
-                    bomb_prob = snapshot.bomb_probabilities.get(pos, 1.0)
-                    log(
-                        f"Step {step}: clicking {tile_name} at ({cx},{cy}) "
-                        f"[bomb prob {bomb_prob:.1%}, {snapshot.total_configurations} configs]"
-                    )
-                else:
-                    log(f"Step {step}: clicking {tile_name} at ({cx},{cy})")
+        window_id = self.state.target_window_id
 
-                self._play_do_xdotool_click(cx, cy, window_id)
-                log(f"Step {step}: click sent, waiting for game response (0.8 s)…")
-                time.sleep(0.8)
+        def _click_bg() -> None:
+            self._play_do_xdotool_click(cx, cy, window_id)
+            self._play_click_done.emit()  # cross-thread signal → main thread
 
-                # ── 2. Textbox/dialog loop ────────────────────────────────────
-                game_clear = False
-                for dialog_step in range(MAX_TEXTBOX_CLICKS):
-                    if not self._play_level_running:
-                        break
+        threading.Thread(target=_click_bg, daemon=True).start()
 
-                    log(f"  Dialog check {dialog_step + 1}: checking for textbox…")
-                    has_textbox = self._play_check_template_sync(
-                        _TEXTBOX_REGION, _TEXTBOX_TEMPLATE_PATH, _TEXTBOX_MATCH_THRESHOLD,
-                    )
-                    if not has_textbox:
-                        log("  No textbox detected — proceeding to board re-eval.")
-                        break
+    def _play_after_click(self) -> None:
+        """Main-thread slot: called via signal once the xdotool click finishes."""
+        if not self._play_level_running:
+            return
+        step = self._play_iteration
+        self._set_status(f"Step {step}: click sent — waiting 0.8 s for game response…")
+        self._play_dialog_steps = 0
+        QTimer.singleShot(800, self._play_check_dialog_step)
 
-                    log("  Textbox present — checking for Game Clear…")
-                    is_clear = self._play_check_template_sync(
-                        _TEXTBOX_GAME_CLEAR_REGION,
-                        _TEXTBOX_GAME_CLEAR_TEMPLATE_PATH,
-                        _TEXTBOX_GAME_CLEAR_MATCH_THRESHOLD,
-                    )
-                    if is_clear:
-                        game_clear = True
-                        log("  Game Clear detected! Level complete.", "success")
-                        break
+    def _play_check_dialog_step(self) -> None:
+        """Main-thread: check for dialog textbox; advance or move to board refresh."""
+        if not self._play_level_running:
+            return
 
-                    log(f"  Not game clear — clicking to advance dialog ({dialog_step + 1})…")
-                    self._play_click_game_center()
-                    time.sleep(0.5)
+        MAX_DIALOG_STEPS = 30
+        self._play_dialog_steps += 1
+        step = self._play_iteration
+        ds = self._play_dialog_steps
 
-                if game_clear or not self._play_level_running:
-                    break
+        self._set_status(f"  Step {step} dialog {ds}: checking for textbox…")
+        has_textbox = self._play_check_template_now(
+            _TEXTBOX_REGION, _TEXTBOX_TEMPLATE_PATH, _TEXTBOX_MATCH_THRESHOLD,
+        )
 
-                # ── 3. Re-evaluate board state ───────────────────────────────
-                log(f"Step {step}: re-evaluating board state…")
-                done_event = threading.Event()
+        if not has_textbox:
+            self._set_status(f"  Step {step} dialog {ds}: no textbox — re-evaluating board…")
+            self._refresh_tiles()
+            if self._play_level_running:
+                QTimer.singleShot(200, self._play_step)
+            return
 
-                def _do_refresh(_ev=done_event):
-                    try:
-                        self._refresh_tiles()
-                    finally:
-                        _ev.set()
+        self._set_status(f"  Step {step} dialog {ds}: textbox present — checking for Game Clear…")
+        is_clear = self._play_check_template_now(
+            _TEXTBOX_GAME_CLEAR_REGION,
+            _TEXTBOX_GAME_CLEAR_TEMPLATE_PATH,
+            _TEXTBOX_GAME_CLEAR_MATCH_THRESHOLD,
+        )
+        if is_clear:
+            self._set_status("  Game Clear detected! Level complete.", "success")
+            self._play_stop("Game Clear!", "success")
+            return
 
-                QTimer.singleShot(0, _do_refresh)
-                timed_out = not done_event.wait(timeout=10.0)
-                if timed_out:
-                    log("  Board refresh timed out — stopping.", "error")
-                    break
-                log(f"Step {step}: board refreshed, looping to next move.")
-                time.sleep(0.2)
-        finally:
-            self._play_level_running = False
-            QTimer.singleShot(0, lambda: self.play_level_btn.setText("Play Level"))
-            log("Play Level loop ended.")
+        if ds >= MAX_DIALOG_STEPS:
+            self._play_stop(f"Dialog loop exceeded {MAX_DIALOG_STEPS} steps — stopping.", "error")
+            return
+
+        self._set_status(f"  Step {step} dialog {ds}: not game clear — advancing dialog…")
+        self._play_click_game_center()
+        QTimer.singleShot(500, self._play_check_dialog_step)
+
+    def _play_check_template_now(
+        self,
+        region: tuple[float, float, float, float],
+        template_path: Path,
+        threshold: float,
+    ) -> bool:
+        """Template match called directly on the main thread — no threading needed."""
+        if _cv2 is None or not template_path.exists():
+            return False
+
+        result = self._grab_textbox_crop(region)
+        if result is None:
+            return False
+        crop, _ = result
+
+        template = _cv2.imread(str(template_path))
+        if template is None:
+            return False
+
+        th, tw = template.shape[:2]
+        ch, cw = crop.shape[:2]
+        if tw > cw or th > ch:
+            scale = min(cw / tw, ch / th)
+            template = _cv2.resize(
+                template,
+                (max(1, int(tw * scale)), max(1, int(th * scale))),
+                interpolation=_cv2.INTER_AREA,
+            )
+
+        gray_crop = _cv2.cvtColor(crop, _cv2.COLOR_BGR2GRAY)
+        gray_tpl = _cv2.cvtColor(template, _cv2.COLOR_BGR2GRAY)
+        result_map = _cv2.matchTemplate(gray_crop, gray_tpl, _cv2.TM_CCOEFF_NORMED)
+        _, score, _, _ = _cv2.minMaxLoc(result_map)
+        return score >= threshold
 
     def _play_find_best_tile(self) -> tuple[str, int, int] | None:
         """Return (tile_name, screen_cx, screen_cy) for the safest useful tile, or None."""
@@ -1426,53 +1465,6 @@ class OverlayControlWindow(QMainWindow):
             subprocess.run(["xdotool", "mouseup", "--clearmodifiers", "1"], check=False, capture_output=True)
         except Exception:
             pass
-
-    def _play_check_template_sync(
-        self,
-        region: tuple[float, float, float, float],
-        template_path: Path,
-        threshold: float,
-    ) -> bool:
-        """Thread-safe template match: Qt capture is dispatched to the main thread."""
-        if _cv2 is None or not template_path.exists():
-            return False
-
-        result_holder: list[object] = [None]
-        done = threading.Event()
-
-        def _capture(_rh=result_holder, _ev=done):
-            try:
-                _rh[0] = self._grab_textbox_crop(region)
-            finally:
-                _ev.set()
-
-        QTimer.singleShot(0, _capture)
-        done.wait(timeout=5.0)
-
-        crop_result = result_holder[0]
-        if crop_result is None:
-            return False
-        crop, _ = crop_result  # type: ignore[misc]
-
-        template = _cv2.imread(str(template_path))
-        if template is None:
-            return False
-
-        th, tw = template.shape[:2]
-        ch, cw = crop.shape[:2]
-        if tw > cw or th > ch:
-            scale = min(cw / tw, ch / th)
-            template = _cv2.resize(
-                template,
-                (max(1, int(tw * scale)), max(1, int(th * scale))),
-                interpolation=_cv2.INTER_AREA,
-            )
-
-        gray_crop = _cv2.cvtColor(crop, _cv2.COLOR_BGR2GRAY)
-        gray_tpl = _cv2.cvtColor(template, _cv2.COLOR_BGR2GRAY)
-        result_map = _cv2.matchTemplate(gray_crop, gray_tpl, _cv2.TM_CCOEFF_NORMED)
-        _, score, _, _ = _cv2.minMaxLoc(result_map)
-        return score >= threshold
 
     def _play_click_game_center(self) -> None:
         """Click the centre of the game area to advance a dialog box."""
