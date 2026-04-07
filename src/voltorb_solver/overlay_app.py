@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QSplitter,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -413,8 +414,18 @@ class OverlayControlWindow(QMainWindow):
         root = QWidget()
         root.setObjectName("RootPanel")
         self.setCentralWidget(root)
-        layout = QVBoxLayout(root)
-        layout.setContentsMargins(16, 16, 16, 16)
+        root_layout = QVBoxLayout(root)
+        root_layout.setContentsMargins(16, 16, 16, 16)
+        root_layout.setSpacing(0)
+
+        splitter = QSplitter(Qt.Vertical)
+        splitter.setChildrenCollapsible(False)
+        splitter.setObjectName("MainSplitter")
+        root_layout.addWidget(splitter)
+
+        bottom_pane = QWidget()
+        layout = QVBoxLayout(bottom_pane)
+        layout.setContentsMargins(0, 8, 0, 0)
         layout.setSpacing(12)
 
         header_card = QFrame()
@@ -438,10 +449,12 @@ class OverlayControlWindow(QMainWindow):
         self.log_view = QTextEdit()
         self.log_view.setObjectName("LogView")
         self.log_view.setReadOnly(True)
-        self.log_view.setFixedHeight(150)
+        self.log_view.setMinimumHeight(60)
         self.log_view.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
         header_layout.addWidget(self.log_view)
-        layout.addWidget(header_card)
+        splitter.addWidget(header_card)
+        splitter.addWidget(bottom_pane)
+        splitter.setSizes([200, 400])
 
         monitor_card = QFrame()
         monitor_card.setObjectName("Card")
@@ -776,6 +789,17 @@ class OverlayControlWindow(QMainWindow):
 
             QPushButton#ProbToggle:checked {
                 background: #5b21b6;
+            }
+
+            QSplitter#MainSplitter::handle {
+                height: 8px;
+                background: #d7e1ea;
+                border-radius: 4px;
+                margin: 2px 0;
+            }
+
+            QSplitter#MainSplitter::handle:hover {
+                background: #97b0c6;
             }
             """
         )
