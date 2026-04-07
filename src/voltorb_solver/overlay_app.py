@@ -1370,7 +1370,7 @@ class OverlayControlWindow(QMainWindow):
             self._set_status(f"  Step {step} dialog {ds}: no textbox — re-evaluating board…")
             self._refresh_tiles()
             if self._play_level_running:
-                QTimer.singleShot(200, self._play_step)
+                QTimer.singleShot(1000, self._play_step)
             return
 
         self._set_status(f"  Step {step} dialog {ds}: textbox present — checking for Game Clear…")
