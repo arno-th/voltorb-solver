@@ -603,6 +603,12 @@ class OverlayControlWindow(QMainWindow):
         self.relabel_btn = QPushButton("Label/relabel game")
         self.relabel_btn.setObjectName("SecondaryButton")
         self.relabel_btn.clicked.connect(self.relabel_regions)
+        self.parse_anchors_btn = QPushButton("Parse Anchors")
+        self.parse_anchors_btn.setObjectName("SecondaryButton")
+        self.parse_anchors_btn.clicked.connect(self._parse_anchors_debug)
+        self.show_anchor_region_btn = QPushButton("Show Anchor Region")
+        self.show_anchor_region_btn.setObjectName("SecondaryButton")
+        self.show_anchor_region_btn.clicked.connect(self._show_anchor_region_overlay)
         self.parse_all_clues_btn = QPushButton("Parse clues")
         self.parse_all_clues_btn.setObjectName("PrimaryButton")
         self.parse_all_clues_btn.clicked.connect(self.parse_all_clues)
@@ -616,6 +622,8 @@ class OverlayControlWindow(QMainWindow):
         debug_btn_row = QHBoxLayout()
         debug_btn_row.setSpacing(8)
         debug_btn_row.addWidget(self.relabel_btn)
+        debug_btn_row.addWidget(self.parse_anchors_btn)
+        debug_btn_row.addWidget(self.show_anchor_region_btn)
         debug_btn_row.addWidget(self.parse_all_clues_btn)
         debug_btn_row.addWidget(self.parse_tiles_btn)
         debug_btn_row.addWidget(self.clear_btn)
@@ -1071,16 +1079,20 @@ class OverlayControlWindow(QMainWindow):
             self._show_error("No monitor selected.")
             return
 
-        mapping_rect = self._mapping_rect_for_signature(self._last_capture_signature)
-        if mapping_rect is not None:
-            gx, gy, gw, gh = (
-                mapping_rect.x(), mapping_rect.y(),
-                mapping_rect.width(), mapping_rect.height(),
-            )
+        # Use the same geometry logic as _show_anchor_region_overlay: query the
+        # window directly when a target window is selected so that the coordinate
+        # origin matches the anchor region display.
+        if self.state.target_window_id is not None:
+            geometry = self._query_window_geometry(self.state.target_window_id)
+            if geometry is None:
+                self._show_error("Could not query window geometry.")
+                return
+            gx, gy, gw, gh = geometry
         else:
             geo = screen.geometry()
-            if self._last_image_size is not None:
-                mr = _map_image_to_overlay(geo.width(), geo.height(), *self._last_image_size)
+            img_size = self._last_image_size or self._anchor_image_size
+            if img_size is not None:
+                mr = _map_image_to_overlay(geo.width(), geo.height(), *img_size)
                 mr.translate(geo.x(), geo.y())
                 gx, gy, gw, gh = mr.x(), mr.y(), mr.width(), mr.height()
             else:
@@ -2288,6 +2300,85 @@ class OverlayControlWindow(QMainWindow):
         self._anchor_board_rect = rect
         self._anchor_image_size = (img.shape[1], img.shape[0])
         return True
+
+    def _parse_anchors_debug(self) -> None:
+        """Capture a screenshot, detect TR+BL anchors, and report the board rect."""
+        tmp_path = str(
+            Path(gettempdir())
+            / f"voltorb_anchor_capture_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.png"
+        )
+        if not self._capture_game_screenshot(tmp_path):
+            return
+        found = self._detect_and_cache_anchor_board_rect(tmp_path)
+        if not found:
+            self._set_status("Anchor detection failed — no board rect found. Check TR+BL anchor templates.", "warning")
+            return
+        left, top, right, bottom = self._anchor_board_rect  # type: ignore[misc]
+        img_w, img_h = self._anchor_image_size  # type: ignore[misc]
+        self._set_status(
+            f"Anchors detected: board px ({left},{top})–({right},{bottom})  "
+            f"{right - left}×{bottom - top}px  image {img_w}×{img_h}",
+            "success",
+        )
+
+    def _show_anchor_region_overlay(self) -> None:
+        """Draw a border overlay showing the board rect derived from TR+BL anchor templates."""
+        if self._anchor_board_rect is None or self._anchor_image_size is None:
+            self._set_status("No anchor rect cached — run 'Parse Anchors' first.", "warning")
+            return
+
+        left, top, right, bottom = self._anchor_board_rect
+        img_w, img_h = self._anchor_image_size
+
+        screen = self._get_selected_screen()
+        if screen is None:
+            self._show_error("No monitor selected.")
+            return
+
+        # Compute the mapping from image pixels to screen coordinates directly from
+        # the current window/screen geometry — do NOT rely on _last_capture_signature,
+        # which may be stale or from a different capture (e.g. a prior screen capture
+        # while a window is now selected).
+        if self.state.target_window_id is not None:
+            geometry = self._query_window_geometry(self.state.target_window_id)
+            if geometry is None:
+                self._show_error("Could not query window geometry.")
+                return
+            gx, gy, gw, gh = geometry
+        else:
+            geo = screen.geometry()
+            mr = _map_image_to_overlay(geo.width(), geo.height(), img_w, img_h)
+            mr.translate(geo.x(), geo.y())
+            gx, gy, gw, gh = mr.x(), mr.y(), mr.width(), mr.height()
+
+        # Convert image-pixel board corners → screen coords.
+        scale_x = gw / img_w
+        scale_y = gh / img_h
+        rx = gx + int(left * scale_x)
+        ry = gy + int(top * scale_y)
+        rw = max(1, int((right - left) * scale_x))
+        rh = max(1, int((bottom - top) * scale_y))
+        board_rect = QRect(rx, ry, rw, rh)
+
+        color = QColor(255, 200, 0)  # gold
+        segments: list[OverlayBorderWindow] = []
+        for side in ("top", "bottom", "left", "right"):
+            seg = OverlayBorderWindow(color, thickness=3)
+            seg.show_for_rect(board_rect, side, screen=screen)
+            segments.append(seg)
+
+        self._set_status(
+            f"Anchor board region: screen=({rx},{ry}) {rw}×{rh}px  "
+            f"image px ({left},{top})–({right},{bottom})",
+            "info",
+        )
+
+        def _hide() -> None:
+            for s in segments:
+                s.hide()
+                s.deleteLater()
+
+        QTimer.singleShot(4000, _hide)
 
     def _board_region_from_anchor(
         self,
