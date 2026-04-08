@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
     QFrame,
+    QSpinBox,
     QHBoxLayout,
     QLabel,
     QMainWindow,
@@ -435,6 +436,7 @@ class OverlayControlWindow(QMainWindow):
         self._play_level_running = False
         self._play_iteration = 0
         self._play_dialog_steps = 0
+        self._play_click_delay_ms = 800
         self._play_click_done.connect(self._play_after_click)
         self._anchor_board_rect: tuple[int, int, int, int] | None = None  # (left, top, right, bottom) image px
         self._anchor_image_size: tuple[int, int] | None = None
@@ -561,9 +563,20 @@ class OverlayControlWindow(QMainWindow):
         self.clear_game_btn = QPushButton("Clear Game")
         self.clear_game_btn.setObjectName("DangerButton")
         self.clear_game_btn.clicked.connect(self.clear_overlay)
+        self.click_delay_spin = QSpinBox()
+        self.click_delay_spin.setRange(100, 5000)
+        self.click_delay_spin.setSingleStep(100)
+        self.click_delay_spin.setValue(self._play_click_delay_ms)
+        self.click_delay_spin.setSuffix(" ms")
+        self.click_delay_spin.setToolTip("Delay between clicking a tile and checking for a text box")
+        self.click_delay_spin.valueChanged.connect(lambda v: setattr(self, '_play_click_delay_ms', v))
+        click_delay_label = QLabel("Click delay:")
         runtime_btn_row.addWidget(self.start_play_btn)
         runtime_btn_row.addWidget(self.refresh_tiles_btn)
         runtime_btn_row.addWidget(self.clear_game_btn)
+        runtime_btn_row.addSpacing(12)
+        runtime_btn_row.addWidget(click_delay_label)
+        runtime_btn_row.addWidget(self.click_delay_spin)
         runtime_btn_row.addStretch(1)
         runtime_layout.addLayout(runtime_btn_row)
         layout.addWidget(runtime_card)
@@ -1371,7 +1384,13 @@ class OverlayControlWindow(QMainWindow):
         self._save_textbox_offsets()
 
     def _get_textbox_region(self) -> tuple[tuple[float, float, float, float], bool]:
-        """Return (region, is_fallback). Falls back to anchor rect or hardcoded constant when no board parsed."""
+        """Return (region, is_fallback). Prefers anchor rect; falls back to tile-based or hardcoded."""
+        anchor = self._board_region_from_anchor(
+            self._textbox_x, self._textbox_y, self._textbox_w, self._textbox_h,
+        )
+        if anchor is not None:
+            return anchor
+
         tile_regions = [r for r in self._last_parse_regions if self._is_tile_region(r.name)]
         if tile_regions and self._last_image_size is not None:
             img_w, img_h = self._last_image_size
@@ -1395,15 +1414,16 @@ class OverlayControlWindow(QMainWindow):
 
                 return (x0 / img_w, y0 / img_h, x1 / img_w, y1 / img_h), False
 
-        anchor = self._board_region_from_anchor(
-            self._textbox_x, self._textbox_y, self._textbox_w, self._textbox_h,
-        )
-        if anchor is not None:
-            return anchor
         return _TEXTBOX_REGION, True
 
     def _get_game_clear_region(self) -> tuple[tuple[float, float, float, float], bool]:
-        """Return (region, is_fallback). Falls back to anchor rect or hardcoded constant when no board parsed."""
+        """Return (region, is_fallback). Prefers anchor rect; falls back to tile-based or hardcoded."""
+        anchor = self._board_region_from_anchor(
+            self._game_clear_x, self._game_clear_y, self._game_clear_w, self._game_clear_h,
+        )
+        if anchor is not None:
+            return anchor
+
         tile_regions = [r for r in self._last_parse_regions if self._is_tile_region(r.name)]
         if tile_regions and self._last_image_size is not None:
             img_w, img_h = self._last_image_size
@@ -1427,15 +1447,16 @@ class OverlayControlWindow(QMainWindow):
 
                 return (x0 / img_w, y0 / img_h, x1 / img_w, y1 / img_h), False
 
-        anchor = self._board_region_from_anchor(
-            self._game_clear_x, self._game_clear_y, self._game_clear_w, self._game_clear_h,
-        )
-        if anchor is not None:
-            return anchor
         return _TEXTBOX_GAME_CLEAR_REGION, True
 
     def _get_play_level_region(self) -> tuple[tuple[float, float, float, float], bool]:
-        """Return (region, is_fallback). Falls back to anchor rect or hardcoded constant when no board parsed."""
+        """Return (region, is_fallback). Prefers anchor rect; falls back to tile-based or hardcoded."""
+        anchor = self._board_region_from_anchor(
+            self._play_level_x, self._play_level_y, self._play_level_w, self._play_level_h,
+        )
+        if anchor is not None:
+            return anchor
+
         tile_regions = [r for r in self._last_parse_regions if self._is_tile_region(r.name)]
         if tile_regions and self._last_image_size is not None:
             img_w, img_h = self._last_image_size
@@ -1459,11 +1480,6 @@ class OverlayControlWindow(QMainWindow):
 
                 return (x0 / img_w, y0 / img_h, x1 / img_w, y1 / img_h), False
 
-        anchor = self._board_region_from_anchor(
-            self._play_level_x, self._play_level_y, self._play_level_w, self._play_level_h,
-        )
-        if anchor is not None:
-            return anchor
         return _TEXTBOX_PLAY_LEVEL_REGION, True
 
     def _check_textbox_template(self) -> None:
@@ -1736,9 +1752,10 @@ class OverlayControlWindow(QMainWindow):
         if not self._play_level_running:
             return
         step = self._play_iteration
-        self._set_status(f"Step {step}: click sent — waiting 0.8 s for game response…")
+        delay_ms = self._play_click_delay_ms
+        self._set_status(f"Step {step}: click sent — waiting {delay_ms} ms for game response…")
         self._play_dialog_steps = 0
-        QTimer.singleShot(800, self._play_check_dialog_step)
+        QTimer.singleShot(delay_ms, self._play_check_dialog_step)
 
     def _play_check_dialog_step(self) -> None:
         """Main-thread: check for dialog textbox; advance or move to board refresh."""
