@@ -6,6 +6,9 @@ from voltorb_solver.game_state import GameState
 from voltorb_solver.solver import SolverSnapshot
 
 
+SAFE_BOMB_PROBABILITY_EPSILON = 1e-12
+
+
 @dataclass(slots=True)
 class MoveSuggestion:
     row: int
@@ -23,6 +26,22 @@ def _expected_value_for_pos(snapshot: SolverSnapshot, pos: tuple[int, int], bomb
         + probs[2] * 2.0
         + probs[3] * 3.0
     )
+
+
+def _is_guaranteed_safe(bomb_probability: float) -> bool:
+    return bomb_probability <= SAFE_BOMB_PROBABILITY_EPSILON
+
+
+def _safest_sort_key(move: MoveSuggestion) -> tuple[int, float, float, int, int]:
+    # Priority: guaranteed-safe tiles first (including safe 1s), then risky useful,
+    # then risky non-useful. Within each bucket prefer lower bomb risk then EV.
+    if _is_guaranteed_safe(move.bomb_probability):
+        bucket = 0
+    elif move.is_useful:
+        bucket = 1
+    else:
+        bucket = 2
+    return (bucket, move.bomb_probability, -move.expected_value, move.row, move.col)
 
 
 def suggest_moves(
@@ -51,17 +70,13 @@ def suggest_moves(
                 )
             )
 
-    # Only recommend tiles that can possibly be a 2 or 3 — tiles that are
-    # definitively 0-or-1 have nothing to gain and should be skipped.
     useful = [c for c in candidates if c.is_useful]
-    pool = useful if useful else candidates  # fall back if somehow none are useful
 
-    safest = sorted(
-        pool,
-        key=lambda move: (move.bomb_probability, -move.expected_value, move.row, move.col),
-    )[:top_n]
+    # For safety-first play, show guaranteed-safe tiles first even when they are
+    # definitely 1s, so the solver can clear free clicks before taking risk.
+    safest = sorted(candidates, key=_safest_sort_key)[:top_n]
     best_ev = sorted(
-        pool,
+        useful if useful else candidates,
         key=lambda move: (-move.expected_value, move.bomb_probability, move.row, move.col),
     )[:top_n]
 

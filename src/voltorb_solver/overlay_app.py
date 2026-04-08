@@ -47,6 +47,18 @@ except Exception:
     _pynput_kb = None
 
 
+def _expected_tile_value(probs: dict[int, float]) -> float:
+    return probs[1] * 1.0 + probs[2] * 2.0 + probs[3] * 3.0
+
+
+def _recommendation_bucket(bomb_probability: float, is_useful: bool) -> int:
+    if bomb_probability <= 0.0:
+        return 0
+    if is_useful:
+        return 1
+    return 2
+
+
 class _GlobalHotkeyListener:
     """Manages a pynput GlobalHotKeys listener that fires a callback from any focused window."""
 
@@ -1895,9 +1907,10 @@ class OverlayControlWindow(QMainWindow):
             self._show_error("No valid configurations — cannot determine best tile.")
             return
 
-        # Find the safest useful unrevealed tile (lowest bomb probability).
+        # Priority: guaranteed-safe tiles first (including safe 1s), then risky useful tiles.
         best_region: Region | None = None
-        min_prob = float("inf")
+        best_prob = float("inf")
+        best_rank: tuple[int, float, float, int, int] | None = None
         for region in tile_regions:
             m = re.match(r"^\((\d),(\d)\)$", region.name)
             if not m:
@@ -1906,15 +1919,23 @@ class OverlayControlWindow(QMainWindow):
             if self._game_state.board[r_idx][c_idx].revealed:
                 continue
             pos = (r_idx, c_idx)
-            if pos not in snapshot.useful_positions:
-                continue
             prob = snapshot.bomb_probabilities.get(pos, 1.0)
-            if prob < min_prob:
-                min_prob = prob
+            probs = snapshot.value_probabilities.get(pos, {0: 1.0, 1: 0.0, 2: 0.0, 3: 0.0})
+            expected_value = _expected_tile_value(probs)
+            rank = (
+                _recommendation_bucket(prob, pos in snapshot.useful_positions),
+                prob,
+                -expected_value,
+                r_idx,
+                c_idx,
+            )
+            if best_rank is None or rank < best_rank:
+                best_rank = rank
+                best_prob = prob
                 best_region = region
 
         if best_region is None:
-            self._show_error("No recommended tile found (all useful tiles may be revealed).")
+            self._show_error("No recommended tile found (all unrevealed tiles may already be resolved).")
             return
 
         # Map tile region to absolute screen coordinates.
@@ -1983,7 +2004,7 @@ class OverlayControlWindow(QMainWindow):
         # Show the equivalent manual command so you can test it in a terminal.
         manual_cmd = f"xdotool mousemove --sync {cx} {cy} mousedown --clearmodifiers 1 mouseup --clearmodifiers 1"
         self._set_status(
-            f"Clicking {tile_name} at ({cx}, {cy}) — bomb prob {min_prob:.1%}.  "
+            f"Clicking {tile_name} at ({cx}, {cy}) — bomb prob {best_prob:.1%}.  "
             f"Manual: {manual_cmd}",
             level="success",
         )
@@ -2399,7 +2420,7 @@ class OverlayControlWindow(QMainWindow):
         return results
 
     def _play_find_best_tile(self) -> tuple[str, int, int] | None:
-        """Return (tile_name, screen_cx, screen_cy) for the safest useful tile, or None."""
+        """Return (tile_name, screen_cx, screen_cy) using safe-first tile priority."""
         if self._last_capture_signature is None or self._last_image_size is None:
             return None
 
@@ -2409,7 +2430,7 @@ class OverlayControlWindow(QMainWindow):
             return None
 
         best_region: Region | None = None
-        min_prob = float("inf")
+        best_rank: tuple[int, float, float, int, int] | None = None
         for region in tile_regions:
             m = re.match(r"^\((\d),(\d)\)$", region.name)
             if not m:
@@ -2418,11 +2439,18 @@ class OverlayControlWindow(QMainWindow):
             if self._game_state.board[r_idx][c_idx].revealed:
                 continue
             pos = (r_idx, c_idx)
-            if pos not in snapshot.useful_positions:
-                continue
             prob = snapshot.bomb_probabilities.get(pos, 1.0)
-            if prob < min_prob:
-                min_prob = prob
+            probs = snapshot.value_probabilities.get(pos, {0: 1.0, 1: 0.0, 2: 0.0, 3: 0.0})
+            expected_value = _expected_tile_value(probs)
+            rank = (
+                _recommendation_bucket(prob, pos in snapshot.useful_positions),
+                prob,
+                -expected_value,
+                r_idx,
+                c_idx,
+            )
+            if best_rank is None or rank < best_rank:
+                best_rank = rank
                 best_region = region
 
         if best_region is None:
@@ -3335,17 +3363,23 @@ class OverlayControlWindow(QMainWindow):
             return
 
         recommended_name: str | None = None
-        min_prob = float("inf")
+        best_rank: tuple[int, float, float, int, int] | None = None
         for region in unrevealed:
             m = re.match(r"^\((\d),(\d)\)$", region.name)
             assert m
             pos = (int(m.group(1)), int(m.group(2)))
-            # Only star tiles that can still be a 2 or 3 — useless tiles are skipped.
-            if pos not in snapshot.useful_positions:
-                continue
             prob = snapshot.bomb_probabilities.get(pos, 1.0)
-            if prob < min_prob:
-                min_prob = prob
+            probs = snapshot.value_probabilities.get(pos, {0: 1.0, 1: 0.0, 2: 0.0, 3: 0.0})
+            expected_value = _expected_tile_value(probs)
+            rank = (
+                _recommendation_bucket(prob, pos in snapshot.useful_positions),
+                prob,
+                -expected_value,
+                int(m.group(1)),
+                int(m.group(2)),
+            )
+            if best_rank is None or rank < best_rank:
+                best_rank = rank
                 recommended_name = region.name
 
         data: list[tuple[tuple[int, int, int, int], float, bool]] = []
