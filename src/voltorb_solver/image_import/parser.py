@@ -76,6 +76,17 @@ class ImageParser:
     _TILE_CANONICAL_SIZE = (64, 64)
     _CLUE_DIGIT_CANONICAL_SIZE = (32, 32)  # w, h for clue digit templates
 
+    # Apply hole-count tiebreaker when winner leads runner-up by less than this margin.
+    _HOLE_TIEBREAK_MARGIN = 0.05
+
+    # Expected enclosed hole counts for the total (top) field.
+    # Totals are always zero-padded to 2 digits (e.g. "08", "09"), so the leading "0"
+    # contributes +1 hole, making the 8-vs-9 distinction (3 vs 2 holes) reliable.
+    _TOTAL_HOLE_COUNTS: dict[int, int] = {0: 2, 4: 2, 6: 2, 8: 3, 9: 2}
+
+    # Expected enclosed hole counts for the voltorb (bottom) field — single digit.
+    _VOLTORB_HOLE_COUNTS: dict[int, int] = {0: 1, 4: 1}
+
     def __init__(self) -> None:
         self._templates_loaded = False
         self._template_bank: dict[str, dict[int, list[np.ndarray]]] = {
@@ -141,8 +152,10 @@ class ImageParser:
         x0, x1 = int(xs.min()), int(xs.max()) + 1
         y0, y1 = int(ys.min()), int(ys.max()) + 1
         tight = bw[y0:y1, x0:x1]
-        # Resize to a fixed canonical size so matching is always scale-invariant.
-        return cv2.resize(tight, self._CLUE_DIGIT_CANONICAL_SIZE, interpolation=cv2.INTER_AREA)
+        # Return tight crop at native resolution — no resize.
+        # All clue regions from the same game/monitor are the same pixel size so
+        # template and live ROI crops will match exactly without scaling.
+        return tight
 
     def _load_clue_templates(self) -> None:
         if self._templates_loaded or cv2 is None:
@@ -223,6 +236,27 @@ class ImageParser:
         self._templates_loaded = True
 
     @staticmethod
+    def _count_holes(bw_tight: np.ndarray) -> int:
+        """Count enclosed background regions (holes) in a white-on-black binary tight crop.
+
+        Pads with one background pixel so the outer background always touches the border,
+        then counts any background connected components that are entirely interior.
+        Examples: single '8' → 2; '08' → 3; single '9'/'0'/'6' → 1; '09' → 2.
+        """
+        if cv2 is None or bw_tight.size == 0:
+            return 0
+        padded = cv2.copyMakeBorder(bw_tight, 1, 1, 1, 1, cv2.BORDER_CONSTANT, value=0)
+        inv = cv2.bitwise_not(padded)
+        n_labels, labels = cv2.connectedComponents(inv, connectivity=8)
+        h, w = labels.shape
+        border_labels: set[int] = set()
+        border_labels.update(int(v) for v in labels[0, :])
+        border_labels.update(int(v) for v in labels[-1, :])
+        border_labels.update(int(v) for v in labels[:, 0])
+        border_labels.update(int(v) for v in labels[:, -1])
+        return sum(1 for lbl in range(1, n_labels) if lbl not in border_labels)
+
+    @staticmethod
     def _axis_from_region_name(region_name: str) -> str | None:
         """Return 'row', 'col', or None (unknown) from a region label like 'r0' / 'c3'."""
         if len(region_name) >= 2 and region_name[0] == "r" and region_name[1:].isdigit():
@@ -263,10 +297,13 @@ class ImageParser:
 
         best_value: int | None = None
         best_score = -1.0
+        second_value: int | None = None
+        second_score = -1.0
         seen_templates: set[int] = set()
 
-        # Normalize the live ROI to the same canonical size as stored templates so
-        # matching is scale-invariant and produces a 1×1 response (pure shape score).
+        # Tight-crop the live ROI — no resize. Each template stores its own native
+        # tight-crop size; we resize the query to match that size exactly before
+        # scoring so the 1×1 NCC response is a pure shape similarity at full detail.
         bw_tight_ys, bw_tight_xs = np.where(bw > 0)
         if len(bw_tight_xs) == 0:
             if save_if_unmatched:
@@ -274,9 +311,7 @@ class ImageParser:
             return None, -1.0
         bx0, bx1 = int(bw_tight_xs.min()), int(bw_tight_xs.max()) + 1
         by0, by1 = int(bw_tight_ys.min()), int(bw_tight_ys.max()) + 1
-        bw_canonical = cv2.resize(
-            bw[by0:by1, bx0:bx1], self._CLUE_DIGIT_CANONICAL_SIZE, interpolation=cv2.INTER_AREA
-        )
+        bw_tight = bw[by0:by1, bx0:bx1]
 
         for bank in (primary_bank, fallback_bank):
             for value, templates in bank.items():
@@ -287,12 +322,41 @@ class ImageParser:
                     if tid in seen_templates:
                         continue
                     seen_templates.add(tid)
-                    result = cv2.matchTemplate(bw_canonical, template, cv2.TM_CCOEFF_NORMED)
+                    th, tw = template.shape[:2]
+                    query = (
+                        cv2.resize(bw_tight, (tw, th), interpolation=cv2.INTER_AREA)
+                        if (bw_tight.shape[0] != th or bw_tight.shape[1] != tw)
+                        else bw_tight
+                    )
+                    result = cv2.matchTemplate(query, template, cv2.TM_CCOEFF_NORMED)
                     _, max_val, _, _ = cv2.minMaxLoc(result)
                     score = float(max_val)
                     if score > best_score:
+                        second_score, second_value = best_score, best_value
                         best_score = score
                         best_value = value
+                    elif score > second_score and value != best_value:
+                        second_score = score
+                        second_value = value
+
+        # ── Hole-count tiebreaker ─────────────────────────────────────────────────────
+        # When the NCC margin is small, count enclosed background holes in the
+        # live tight crop and prefer whichever candidate's expected count matches.
+        if (
+            best_value is not None
+            and second_value is not None
+            and (best_score - second_score) < self._HOLE_TIEBREAK_MARGIN
+        ):
+            hole_map = (
+                self._TOTAL_HOLE_COUNTS if kind == "top" else self._VOLTORB_HOLE_COUNTS
+            )
+            if best_value in hole_map and second_value in hole_map:
+                expected_best = hole_map[best_value]
+                expected_second = hole_map[second_value]
+                if expected_best != expected_second:
+                    query_holes = self._count_holes(bw_tight)
+                    if abs(query_holes - expected_second) < abs(query_holes - expected_best):
+                        best_value, best_score = second_value, second_score
 
         if best_value is not None and best_score >= self._TEMPLATE_MIN_SCORE:
             return best_value, best_score
@@ -333,9 +397,7 @@ class ImageParser:
             return None, empty
         bx0, bx1 = int(bw_tight_xs.min()), int(bw_tight_xs.max()) + 1
         by0, by1 = int(bw_tight_ys.min()), int(bw_tight_ys.max()) + 1
-        bw_canonical = cv2.resize(
-            bw[by0:by1, bx0:bx1], self._CLUE_DIGIT_CANONICAL_SIZE, interpolation=cv2.INTER_AREA
-        )
+        bw_tight = bw[by0:by1, bx0:bx1]
 
         results: list[tuple[int, float, np.ndarray]] = []
         seen_templates: set[int] = set()
@@ -351,7 +413,13 @@ class ImageParser:
                     if tid in seen_templates:
                         continue
                     seen_templates.add(tid)
-                    result = cv2.matchTemplate(bw_canonical, template, cv2.TM_CCOEFF_NORMED)
+                    th, tw = template.shape[:2]
+                    query = (
+                        cv2.resize(bw_tight, (tw, th), interpolation=cv2.INTER_AREA)
+                        if (bw_tight.shape[0] != th or bw_tight.shape[1] != tw)
+                        else bw_tight
+                    )
+                    result = cv2.matchTemplate(query, template, cv2.TM_CCOEFF_NORMED)
                     _, max_val, _, _ = cv2.minMaxLoc(result)
                     score = float(max_val)
                     prev = best_per_value.get(value)
@@ -363,7 +431,7 @@ class ImageParser:
             for value, (score, tpl) in best_per_value.items()
         ]
         results.sort(key=lambda t: t[1], reverse=True)
-        return bw_canonical, results[:n]
+        return bw_tight, results[:n]
 
     def _save_unmatched_template_sample(self, roi: np.ndarray, *, kind: str, axis: str, source_tag: str) -> None:
         if cv2 is None or roi.size == 0:
@@ -913,6 +981,31 @@ class ImageParser:
         def _top2_log(top2: list[tuple[int, float, np.ndarray]]) -> str:
             return "  |  ".join(f"#{i+1} v={v} s={s:.3f}" for i, (v, s, _) in enumerate(top2))
 
+        def _tiebreak_log(
+            bw_tight: np.ndarray | None,
+            top2: list[tuple[int, float, np.ndarray]],
+            kind: str,
+        ) -> str:
+            if bw_tight is None or len(top2) < 2:
+                return "n/a"
+            v1, s1, _ = top2[0]
+            v2, s2, _ = top2[1]
+            margin = s1 - s2
+            if margin >= self._HOLE_TIEBREAK_MARGIN:
+                return f"skipped(margin={margin:.3f}>={self._HOLE_TIEBREAK_MARGIN})"
+            hole_map = (
+                self._TOTAL_HOLE_COUNTS if kind == "top" else self._VOLTORB_HOLE_COUNTS
+            )
+            if v1 not in hole_map or v2 not in hole_map:
+                return f"skipped(no_hole_data v1={v1} v2={v2})"
+            e1, e2 = hole_map[v1], hole_map[v2]
+            if e1 == e2:
+                return f"skipped(same_expected_holes={e1})"
+            observed = self._count_holes(bw_tight)
+            flipped = abs(observed - e2) < abs(observed - e1)
+            action = f"flipped->{v2}" if flipped else f"kept->{v1}"
+            return f"holes={observed} expected({v1}:{e1},{v2}:{e2}) {action}"
+
         log_lines = [
             f"source={image_path}",
             f"run_id={run_id}",
@@ -927,6 +1020,8 @@ class ImageParser:
             f"total_score={total_score:.3f}",
             f"voltorbs_top2=[{_top2_log(voltorbs_top2)}]",
             f"total_top2=[{_top2_log(total_top2)}]",
+            f"voltorbs_tiebreak={_tiebreak_log(voltorbs_canonical, voltorbs_top2, 'bottom')}",
+            f"total_tiebreak={_tiebreak_log(total_canonical, total_top2, 'top')}",
         ]
         log_path.write_text("\n".join(log_lines) + "\n", encoding="utf-8")
 
