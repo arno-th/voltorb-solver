@@ -20,8 +20,10 @@ from voltorb_solver.game_state import BOARD_SIZE
 from voltorb_solver.image_import.crop_dialog import CropDialog
 from voltorb_solver.image_import.parser import ImageParser
 from voltorb_solver.recalc_service import RecalculationService
+from voltorb_solver.stats import StatsManager
 from voltorb_solver.ui.board_widget import BoardWidget
 from voltorb_solver.ui.solver_panel import SolverPanel
+from voltorb_solver.ui.stats_panel import StatsPanel
 
 
 class MainWindow(QMainWindow):
@@ -33,6 +35,7 @@ class MainWindow(QMainWindow):
 
         self.service = RecalculationService()
         self.parser = ImageParser()
+        self.stats = StatsManager()
 
         root = QWidget()
         root.setObjectName("root")
@@ -107,14 +110,18 @@ class MainWindow(QMainWindow):
         actions = QHBoxLayout()
         self.reset_btn = QPushButton("Reset")
         self.undo_btn = QPushButton("Undo")
+        self.won_btn = QPushButton("Won! ✓")
+        self.won_btn.setObjectName("wonBtn")
         self.import_btn = QPushButton("Import Image")
         self.parse_single_clue_btn = QPushButton("Parse Single Clue")
         self.reset_btn.clicked.connect(self._reset)
         self.undo_btn.clicked.connect(self._undo)
+        self.won_btn.clicked.connect(self._handle_round_won)
         self.import_btn.clicked.connect(self._import_image)
         self.parse_single_clue_btn.clicked.connect(self._parse_single_clue)
         actions.addWidget(self.reset_btn)
         actions.addWidget(self.undo_btn)
+        actions.addWidget(self.won_btn)
         actions.addWidget(self.import_btn)
         actions.addWidget(self.parse_single_clue_btn)
         left.addLayout(actions)
@@ -129,12 +136,25 @@ class MainWindow(QMainWindow):
         self.solver_panel = SolverPanel()
         right.addWidget(self.solver_panel, 1)
 
+        stats_divider = QFrame()
+        stats_divider.setFrameShape(QFrame.Shape.HLine)
+        stats_divider.setStyleSheet("color: #d4e2ee;")
+        right.addWidget(stats_divider)
+
+        stats_header = QLabel("Statistics")
+        stats_header.setObjectName("sectionTitle")
+        right.addWidget(stats_header)
+
+        self.stats_panel = StatsPanel()
+        right.addWidget(self.stats_panel)
+
         self._loading_clues = False
         self._loading_selection = False
         self._selected_tile = (0, 0)
         self._apply_styles()
         self._sync_selected_inputs()
         self._render_all()
+        self._refresh_stats()
 
     def _card(self, title: str) -> QFrame:
         card = QFrame()
@@ -201,6 +221,15 @@ class MainWindow(QMainWindow):
                 background-color: #9db4d3;
                 color: #f4f8ff;
             }
+            QPushButton#wonBtn {
+                background-color: #16a34a;
+            }
+            QPushButton#wonBtn:hover {
+                background-color: #15803d;
+            }
+            QPushButton#wonBtn:pressed {
+                background-color: #166534;
+            }
             QSpinBox {
                 background: #f8fbff;
                 border: 1px solid #c7d7eb;
@@ -257,6 +286,9 @@ class MainWindow(QMainWindow):
         self.solver_panel.render(result.snapshot, result.safest_moves, result.best_ev_moves)
         self._sync_clue_widgets()
         self._refresh_selection_ui()
+
+    def _refresh_stats(self) -> None:
+        self.stats_panel.refresh(self.stats.lifetime, self.stats.session)
 
     def _sync_clue_widgets(self) -> None:
         self._loading_clues = True
@@ -323,6 +355,8 @@ class MainWindow(QMainWindow):
             self.service.state.set_tile_revealed(row, col, value)
         self.service.recalculate()
         self._render_all()
+        if value == 0:
+            self._handle_bomb_revealed()
 
     def _refresh_selection_ui(self) -> None:
         row, col = self._selected_tile
@@ -332,6 +366,23 @@ class MainWindow(QMainWindow):
         self.impossible_label.setText(f"Impossible: {impossible_text}")
         for value, button in self._value_buttons.items():
             button.setEnabled(value not in impossible)
+
+    def _handle_bomb_revealed(self) -> None:
+        reply = QMessageBox.question(
+            self,
+            "Voltorb Hit!",
+            "You revealed a Voltorb! Record this as a loss and start a new round?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            self.stats.record_bomb()
+            self._refresh_stats()
+            self._reset()
+
+    def _handle_round_won(self) -> None:
+        self.stats.record_win()
+        self._refresh_stats()
+        self._reset()
 
     def _reset(self) -> None:
         self.service.push_state()
