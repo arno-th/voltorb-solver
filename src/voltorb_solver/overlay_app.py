@@ -435,6 +435,8 @@ class OverlayControlWindow(QMainWindow):
         self._play_iteration = 0
         self._play_dialog_steps = 0
         self._play_click_done.connect(self._play_after_click)
+        self._anchor_board_rect: tuple[int, int, int, int] | None = None  # (left, top, right, bottom) image px
+        self._anchor_image_size: tuple[int, int] | None = None
 
         self._textbox_offsets_path = Path("assets/templates/textbox_offsets.json")
         self._textbox_left_tiles = _TEXTBOX_BOARD_LEFT_TILES
@@ -1356,88 +1358,103 @@ class OverlayControlWindow(QMainWindow):
         self._save_textbox_offsets()
 
     def _get_textbox_region(self) -> tuple[tuple[float, float, float, float], bool]:
-        """Return (region, is_fallback). Falls back to hardcoded constant when no board parsed."""
+        """Return (region, is_fallback). Falls back to anchor rect or hardcoded constant when no board parsed."""
         tile_regions = [r for r in self._last_parse_regions if self._is_tile_region(r.name)]
-        if not tile_regions or self._last_image_size is None:
-            return _TEXTBOX_REGION, True
-        img_w, img_h = self._last_image_size
-        if img_w <= 0 or img_h <= 0:
-            return _TEXTBOX_REGION, True
+        if tile_regions and self._last_image_size is not None:
+            img_w, img_h = self._last_image_size
+            if img_w > 0 and img_h > 0:
+                board_left = min(r.x for r in tile_regions)
+                board_bottom = max(r.y + r.h for r in tile_regions)
+                tile_ws = sorted(r.w for r in tile_regions)
+                tile_hs = sorted(r.h for r in tile_regions)
+                tile_w = tile_ws[len(tile_ws) // 2]
+                tile_h = tile_hs[len(tile_hs) // 2]
 
-        board_left = min(r.x for r in tile_regions)
-        board_bottom = max(r.y + r.h for r in tile_regions)
-        tile_ws = sorted(r.w for r in tile_regions)
-        tile_hs = sorted(r.h for r in tile_regions)
-        tile_w = tile_ws[len(tile_ws) // 2]
-        tile_h = tile_hs[len(tile_hs) // 2]
+                x0 = board_left + int(self._textbox_left_tiles * tile_w)
+                x1 = board_left + int(self._textbox_right_tiles * tile_w)
+                y0 = board_bottom + int(self._textbox_top_tiles * tile_h)
+                y1 = board_bottom + int(self._textbox_bottom_tiles * tile_h)
 
-        x0 = board_left + int(self._textbox_left_tiles * tile_w)
-        x1 = board_left + int(self._textbox_right_tiles * tile_w)
-        y0 = board_bottom + int(self._textbox_top_tiles * tile_h)
-        y1 = board_bottom + int(self._textbox_bottom_tiles * tile_h)
+                x0 = max(0, min(x0, img_w - 1))
+                x1 = max(x0 + 1, min(x1, img_w))
+                y0 = max(0, min(y0, img_h - 1))
+                y1 = max(y0 + 1, min(y1, img_h))
 
-        x0 = max(0, min(x0, img_w - 1))
-        x1 = max(x0 + 1, min(x1, img_w))
-        y0 = max(0, min(y0, img_h - 1))
-        y1 = max(y0 + 1, min(y1, img_h))
+                return (x0 / img_w, y0 / img_h, x1 / img_w, y1 / img_h), False
 
-        return (x0 / img_w, y0 / img_h, x1 / img_w, y1 / img_h), False
+        anchor = self._board_region_from_anchor(
+            self._textbox_left_tiles, self._textbox_right_tiles,
+            self._textbox_top_tiles, self._textbox_bottom_tiles,
+        )
+        if anchor is not None:
+            return anchor
+        return _TEXTBOX_REGION, True
 
     def _get_game_clear_region(self) -> tuple[tuple[float, float, float, float], bool]:
-        """Return (region, is_fallback). Falls back to hardcoded constant when no board parsed."""
+        """Return (region, is_fallback). Falls back to anchor rect or hardcoded constant when no board parsed."""
         tile_regions = [r for r in self._last_parse_regions if self._is_tile_region(r.name)]
-        if not tile_regions or self._last_image_size is None:
-            return _TEXTBOX_GAME_CLEAR_REGION, True
-        img_w, img_h = self._last_image_size
-        if img_w <= 0 or img_h <= 0:
-            return _TEXTBOX_GAME_CLEAR_REGION, True
+        if tile_regions and self._last_image_size is not None:
+            img_w, img_h = self._last_image_size
+            if img_w > 0 and img_h > 0:
+                board_left = min(r.x for r in tile_regions)
+                board_bottom = max(r.y + r.h for r in tile_regions)
+                tile_ws = sorted(r.w for r in tile_regions)
+                tile_hs = sorted(r.h for r in tile_regions)
+                tile_w = tile_ws[len(tile_ws) // 2]
+                tile_h = tile_hs[len(tile_hs) // 2]
 
-        board_left = min(r.x for r in tile_regions)
-        board_bottom = max(r.y + r.h for r in tile_regions)
-        tile_ws = sorted(r.w for r in tile_regions)
-        tile_hs = sorted(r.h for r in tile_regions)
-        tile_w = tile_ws[len(tile_ws) // 2]
-        tile_h = tile_hs[len(tile_hs) // 2]
+                x0 = board_left + int(self._game_clear_left_tiles * tile_w)
+                x1 = board_left + int(self._game_clear_right_tiles * tile_w)
+                y0 = board_bottom + int(self._game_clear_top_tiles * tile_h)
+                y1 = board_bottom + int(self._game_clear_bottom_tiles * tile_h)
 
-        x0 = board_left + int(self._game_clear_left_tiles * tile_w)
-        x1 = board_left + int(self._game_clear_right_tiles * tile_w)
-        y0 = board_bottom + int(self._game_clear_top_tiles * tile_h)
-        y1 = board_bottom + int(self._game_clear_bottom_tiles * tile_h)
+                x0 = max(0, min(x0, img_w - 1))
+                x1 = max(x0 + 1, min(x1, img_w))
+                y0 = max(0, min(y0, img_h - 1))
+                y1 = max(y0 + 1, min(y1, img_h))
 
-        x0 = max(0, min(x0, img_w - 1))
-        x1 = max(x0 + 1, min(x1, img_w))
-        y0 = max(0, min(y0, img_h - 1))
-        y1 = max(y0 + 1, min(y1, img_h))
+                return (x0 / img_w, y0 / img_h, x1 / img_w, y1 / img_h), False
 
-        return (x0 / img_w, y0 / img_h, x1 / img_w, y1 / img_h), False
+        anchor = self._board_region_from_anchor(
+            self._game_clear_left_tiles, self._game_clear_right_tiles,
+            self._game_clear_top_tiles, self._game_clear_bottom_tiles,
+        )
+        if anchor is not None:
+            return anchor
+        return _TEXTBOX_GAME_CLEAR_REGION, True
 
     def _get_play_level_region(self) -> tuple[tuple[float, float, float, float], bool]:
-        """Return (region, is_fallback). Falls back to hardcoded constant when no board parsed."""
+        """Return (region, is_fallback). Falls back to anchor rect or hardcoded constant when no board parsed."""
         tile_regions = [r for r in self._last_parse_regions if self._is_tile_region(r.name)]
-        if not tile_regions or self._last_image_size is None:
-            return _TEXTBOX_PLAY_LEVEL_REGION, True
-        img_w, img_h = self._last_image_size
-        if img_w <= 0 or img_h <= 0:
-            return _TEXTBOX_PLAY_LEVEL_REGION, True
+        if tile_regions and self._last_image_size is not None:
+            img_w, img_h = self._last_image_size
+            if img_w > 0 and img_h > 0:
+                board_left = min(r.x for r in tile_regions)
+                board_bottom = max(r.y + r.h for r in tile_regions)
+                tile_ws = sorted(r.w for r in tile_regions)
+                tile_hs = sorted(r.h for r in tile_regions)
+                tile_w = tile_ws[len(tile_ws) // 2]
+                tile_h = tile_hs[len(tile_hs) // 2]
 
-        board_left = min(r.x for r in tile_regions)
-        board_bottom = max(r.y + r.h for r in tile_regions)
-        tile_ws = sorted(r.w for r in tile_regions)
-        tile_hs = sorted(r.h for r in tile_regions)
-        tile_w = tile_ws[len(tile_ws) // 2]
-        tile_h = tile_hs[len(tile_hs) // 2]
+                x0 = board_left + int(self._play_level_left_tiles * tile_w)
+                x1 = board_left + int(self._play_level_right_tiles * tile_w)
+                y0 = board_bottom + int(self._play_level_top_tiles * tile_h)
+                y1 = board_bottom + int(self._play_level_bottom_tiles * tile_h)
 
-        x0 = board_left + int(self._play_level_left_tiles * tile_w)
-        x1 = board_left + int(self._play_level_right_tiles * tile_w)
-        y0 = board_bottom + int(self._play_level_top_tiles * tile_h)
-        y1 = board_bottom + int(self._play_level_bottom_tiles * tile_h)
+                x0 = max(0, min(x0, img_w - 1))
+                x1 = max(x0 + 1, min(x1, img_w))
+                y0 = max(0, min(y0, img_h - 1))
+                y1 = max(y0 + 1, min(y1, img_h))
 
-        x0 = max(0, min(x0, img_w - 1))
-        x1 = max(x0 + 1, min(x1, img_w))
-        y0 = max(0, min(y0, img_h - 1))
-        y1 = max(y0 + 1, min(y1, img_h))
+                return (x0 / img_w, y0 / img_h, x1 / img_w, y1 / img_h), False
 
-        return (x0 / img_w, y0 / img_h, x1 / img_w, y1 / img_h), False
+        anchor = self._board_region_from_anchor(
+            self._play_level_left_tiles, self._play_level_right_tiles,
+            self._play_level_top_tiles, self._play_level_bottom_tiles,
+        )
+        if anchor is not None:
+            return anchor
+        return _TEXTBOX_PLAY_LEVEL_REGION, True
 
     def _check_textbox_template(self) -> None:
         region, _ = self._get_textbox_region()
@@ -1476,25 +1493,52 @@ class OverlayControlWindow(QMainWindow):
             self._show_error("`xdotool` not found. Install xdotool to use Start & Play.")
             return
 
-        self.relabel_regions()
-        self.parse_all_clues()
-        self.parse_tiles()
-        if not self.prob_overlay_btn.isChecked():
-            self.prob_overlay_btn.setChecked(True)
+        if not _TEXTBOX_TEMPLATE_PATH.exists():
+            self._set_status("Warning: textbox template not found — dialog detection disabled.", "warning")
+        if not _TEXTBOX_GAME_CLEAR_TEMPLATE_PATH.exists():
+            self._set_status("Warning: game-clear template not found — completion detection disabled.", "warning")
 
-        if not [r for r in self._last_parse_regions if self._is_tile_region(r.name)]:
-            self._show_error("No tile regions found after parsing.")
+        # Capture one screenshot up-front to: detect board corners via anchors and
+        # check whether the Play Level dialog is already showing before the board appears.
+        tmp_path = str(
+            Path(gettempdir())
+            / f"voltorb_overlay_capture_monitor_{self.state.selected_screen_index + 1}.png"
+        )
+        capture_signature = self._build_capture_signature()
+        if not self._capture_game_screenshot(tmp_path):
             return
+
+        self._detect_and_cache_anchor_board_rect(tmp_path)
+        # Pre-populate signature so play-level click can resolve screen coords before relabeling.
+        self._last_capture_signature = capture_signature
 
         self._play_level_running = True
         self._play_iteration = 0
         self._play_dialog_steps = 0
         self.start_play_btn.setText("Stop Play")
 
-        if not _TEXTBOX_TEMPLATE_PATH.exists():
-            self._set_status("Warning: textbox template not found — dialog detection disabled.", "warning")
-        if not _TEXTBOX_GAME_CLEAR_TEMPLATE_PATH.exists():
-            self._set_status("Warning: game-clear template not found — completion detection disabled.", "warning")
+        # Check if the Play Level dialog is showing before the board is visible.
+        play_level_region, _ = self._get_play_level_region()
+        if _TEXTBOX_PLAY_LEVEL_TEMPLATE_PATH.exists() and self._play_check_template_now(
+            play_level_region, _TEXTBOX_PLAY_LEVEL_TEMPLATE_PATH, _TEXTBOX_PLAY_LEVEL_MATCH_THRESHOLD
+        ):
+            self._set_status("Play Level dialog detected — clicking to start new game…", "info")
+            QTimer.singleShot(0, self._play_start_from_play_level)
+            return
+
+        # Normal flow: board is visible — parse it and start playing.
+        if not self.prob_overlay_btn.isChecked():
+            self.prob_overlay_btn.setChecked(True)
+        if not self._parse_and_apply(
+            tmp_path, capture_signature=capture_signature, relabel_reason="label/relabel game"
+        ):
+            self._play_stop("Failed to parse screenshot.", "error")
+            return
+        self.parse_all_clues()
+        self.parse_tiles()
+        if not [r for r in self._last_parse_regions if self._is_tile_region(r.name)]:
+            self._play_stop("No tile regions found after parsing.", "error")
+            return
 
         self._set_status("Play Level started…", "info")
         QTimer.singleShot(0, self._play_step)
@@ -1788,6 +1832,64 @@ class OverlayControlWindow(QMainWindow):
         cy = gy + int(gh * (t_f + b_f) / 2)
         self._play_do_xdotool_click(cx, cy, self.state.target_window_id)
         QTimer.singleShot(500, self._play_wait_for_play_level)
+
+    # ── Start from Play Level dialog ─────────────────────────────────────────
+    #
+    # Called when Start & Play detects the Play Level prompt before the board
+    # is visible.  Clicks the prompt to launch the next game, then waits for
+    # the board to load before entering the tile-click loop.
+
+    def _play_click_play_level_region(self) -> None:
+        """Click the centre of the Play Level region (works before relabeling)."""
+        region, _ = self._get_play_level_region()
+        l_f, t_f, r_f, b_f = region
+        mapping_rect = self._mapping_rect_for_signature(self._last_capture_signature)
+        if mapping_rect is not None:
+            gx, gy, gw, gh = (
+                mapping_rect.x(), mapping_rect.y(),
+                mapping_rect.width(), mapping_rect.height(),
+            )
+        else:
+            screen = self._get_selected_screen()
+            if screen is None:
+                return
+            geo = screen.geometry()
+            img_size = self._last_image_size or self._anchor_image_size
+            if img_size is not None:
+                mr = _map_image_to_overlay(geo.width(), geo.height(), *img_size)
+                mr.translate(geo.x(), geo.y())
+                gx, gy, gw, gh = mr.x(), mr.y(), mr.width(), mr.height()
+            else:
+                gx, gy, gw, gh = geo.x(), geo.y(), geo.width(), geo.height()
+        cx = gx + int(gw * (l_f + r_f) / 2)
+        cy = gy + int(gh * (t_f + b_f) / 2)
+        self._play_do_xdotool_click(cx, cy, self.state.target_window_id)
+
+    def _play_start_from_play_level(self) -> None:
+        """Click 'Play Level' to start the next game, then wait and relabel."""
+        if not self._play_level_running:
+            return
+        self._set_status("Clicking Play Level to start new game…", "info")
+        self._play_click_play_level_region()
+        QTimer.singleShot(1500, self._play_relabel_and_start_loop)
+
+    def _play_relabel_and_start_loop(self) -> None:
+        """After clicking Play Level: relabel the board and begin the play loop."""
+        if not self._play_level_running:
+            return
+        self.relabel_regions()
+        self.parse_all_clues()
+        self.parse_tiles()
+        if not self.prob_overlay_btn.isChecked():
+            self.prob_overlay_btn.setChecked(True)
+        if not [r for r in self._last_parse_regions if self._is_tile_region(r.name)]:
+            self._play_stop(
+                "No tile regions found after relabeling — board may not be ready yet. Try again.",
+                "error",
+            )
+            return
+        self._set_status("Board loaded — starting play loop…", "info")
+        QTimer.singleShot(0, self._play_step)
 
     def _play_check_template_now(
         self,
@@ -2134,39 +2236,93 @@ class OverlayControlWindow(QMainWindow):
             Path(gettempdir()) / f"voltorb_overlay_capture_monitor_{self.state.selected_screen_index + 1}.png"
         )
         capture_signature = self._build_capture_signature()
-
-        was_overlay_visible = self.overlay_btn.isChecked()
-        if was_overlay_visible:
-            self.x11_overlay.hide()
-
-        if self.state.target_window_id is not None:
-            pixmap = self._capture_window(self.state.target_window_id)
-        else:
-            screen = self._get_selected_screen()
-            if screen is None:
-                if was_overlay_visible:
-                    self.x11_overlay.show()
-                self._show_error("No monitor selected for screen capture.")
-                return
-            pixmap = screen.grabWindow(0)
-
-        if pixmap is None or pixmap.isNull() or not pixmap.save(output_path):
-            if was_overlay_visible:
-                self.x11_overlay.show()
-            target_desc = (
-                f"window #{self.state.target_window_id}"
-                if self.state.target_window_id is not None
-                else "selected monitor"
-            )
-            self._show_error(f"Failed to capture {target_desc}.")
+        if not self._capture_game_screenshot(output_path):
             return
-
-        if was_overlay_visible:
-            self.x11_overlay.show()
-
         self._parse_and_apply(
             output_path, capture_signature=capture_signature, relabel_reason="label/relabel game"
         )
+
+    def _capture_game_screenshot(self, output_path: str) -> bool:
+        """Capture the game window (or selected screen) to output_path.
+
+        Hides the overlay during capture and restores it afterwards.
+        Returns ``True`` on success, ``False`` on failure (error is already shown).
+        """
+        was_overlay_visible = self.overlay_btn.isChecked()
+        if was_overlay_visible:
+            self.x11_overlay.hide()
+        try:
+            if self.state.target_window_id is not None:
+                pixmap = self._capture_window(self.state.target_window_id)
+            else:
+                screen = self._get_selected_screen()
+                if screen is None:
+                    self._show_error("No monitor selected for screen capture.")
+                    return False
+                pixmap = screen.grabWindow(0)
+
+            if pixmap is None or pixmap.isNull() or not pixmap.save(output_path):
+                target_desc = (
+                    f"window #{self.state.target_window_id}"
+                    if self.state.target_window_id is not None
+                    else "selected monitor"
+                )
+                self._show_error(f"Failed to capture {target_desc}.")
+                return False
+            return True
+        finally:
+            if was_overlay_visible:
+                self.x11_overlay.show()
+
+    def _detect_and_cache_anchor_board_rect(self, image_path: str) -> bool:
+        """Try to locate the board via TR + BL anchor templates and cache the result.
+
+        Returns ``True`` if both corners were found with sufficient confidence.
+        """
+        if _cv2 is None:
+            return False
+        rect = self.parser.find_board_corner_rect(image_path)
+        if rect is None:
+            return False
+        img = _cv2.imread(image_path, _cv2.IMREAD_GRAYSCALE)
+        if img is None:
+            return False
+        self._anchor_board_rect = rect
+        self._anchor_image_size = (img.shape[1], img.shape[0])
+        return True
+
+    def _board_region_from_anchor(
+        self,
+        left_tiles: float,
+        right_tiles: float,
+        top_tiles: float,
+        bottom_tiles: float,
+    ) -> tuple[tuple[float, float, float, float], bool] | None:
+        """Compute a textbox region from the cached anchor board rect.
+
+        Returns ``(frac_region, False)`` or ``None`` when the anchor rect is
+        not available.  ``top_tiles`` / ``bottom_tiles`` are signed offsets
+        from the board's bottom edge (negative = above the board).
+        """
+        if self._anchor_board_rect is None or self._anchor_image_size is None:
+            return None
+        left, top, right, bottom = self._anchor_board_rect
+        img_w, img_h = self._anchor_image_size
+        board_w = right - left
+        board_h = bottom - top
+        if board_w <= 0 or board_h <= 0:
+            return None
+        tile_w = board_w / 5.0
+        tile_h = board_h / 5.0
+        x0 = left + int(left_tiles * tile_w)
+        x1 = left + int(right_tiles * tile_w)
+        y0 = bottom + int(top_tiles * tile_h)
+        y1 = bottom + int(bottom_tiles * tile_h)
+        x0 = max(0, min(x0, img_w - 1))
+        x1 = max(x0 + 1, min(x1, img_w))
+        y0 = max(0, min(y0, img_h - 1))
+        y1 = max(y0 + 1, min(y1, img_h))
+        return (x0 / img_w, y0 / img_h, x1 / img_w, y1 / img_h), False
 
     def clear_overlay(self) -> None:
         self.x11_overlay.clear_overlay()

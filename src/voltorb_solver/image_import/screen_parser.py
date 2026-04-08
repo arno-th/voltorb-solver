@@ -61,6 +61,8 @@ class ScreenBoardParser:
         self._tile_template_names: list[str] = []
         self._anchor_templates: list[np.ndarray] = []
         self._anchor_template_names: list[str] = []
+        self._bl_anchor_templates: list[np.ndarray] = []
+        self._bl_anchor_template_names: list[str] = []
         self._grid_layout: dict[str, object] | None = None
         env_debug = os.environ.get("VOLTORB_PARSER_DEBUG_DIR", "").strip()
         selected_debug_dir = debug_dir if debug_dir is not None else (env_debug or None)
@@ -495,17 +497,31 @@ class ScreenBoardParser:
                 best_score = float(max_val)
                 top_left_x = float(max_loc[0])
                 top_left_y = float(max_loc[1])
+                is_bottom_left = (
+                    "bottom_left" in name_lower
+                    or "bottom-left" in name_lower
+                    or "_bl_" in name_lower
+                    or name_lower.startswith("bl_")
+                    or name_lower.endswith("_bl.png")
+                    or "anchor_bl" in name_lower
+                )
                 if is_top_right:
                     reference_x = top_left_x + float(aw)
+                    reference_y = top_left_y
                     corner = "top-right"
+                elif is_bottom_left:
+                    reference_x = top_left_x
+                    reference_y = top_left_y + float(ah)
+                    corner = "bottom-left"
                 else:
                     reference_x = top_left_x
+                    reference_y = top_left_y
                     corner = "top-left"
                 best_data = {
                     "top_left_x": top_left_x,
                     "top_left_y": top_left_y,
                     "reference_x": reference_x,
-                    "reference_y": top_left_y,
+                    "reference_y": reference_y,
                     "corner": corner,
                     "template_name": template_name,
                 }
@@ -883,32 +899,41 @@ class ScreenBoardParser:
         self._tile_template_names = names
         return self._tile_templates
 
+    @staticmethod
+    def _is_tr_anchor_name(name: str) -> bool:
+        nl = name.lower()
+        return (
+            "top_right" in nl or "top-right" in nl or "_tr_" in nl
+            or nl.startswith("tr_") or nl.endswith("_tr.png") or "anchor_tr" in nl
+        )
+
+    @staticmethod
+    def _is_bl_anchor_name(name: str) -> bool:
+        nl = name.lower()
+        return (
+            "bottom_left" in nl or "bottom-left" in nl or "_bl_" in nl
+            or nl.startswith("bl_") or nl.endswith("_bl.png") or "anchor_bl" in nl
+        )
+
     def _load_anchor_templates(self) -> list[np.ndarray]:
         if self._anchor_templates:
             return self._anchor_templates
 
         templates, names = self._load_templates_by_keyword("anchor")
+
+        # Populate BL cache as a side effect while we have all templates in hand.
+        if not self._bl_anchor_templates:
+            bl_pairs = [(t, n) for t, n in zip(templates, names) if self._is_bl_anchor_name(n)]
+            self._bl_anchor_templates = [t for t, _ in bl_pairs]
+            self._bl_anchor_template_names = [n for _, n in bl_pairs]
+
         preferred_templates: list[np.ndarray] = []
         preferred_names: list[str] = []
-        fallback_templates: list[np.ndarray] = []
-        fallback_names: list[str] = []
 
         for template, name in zip(templates, names):
-            name_lower = name.lower()
-            is_top_right = (
-                "top_right" in name_lower
-                or "top-right" in name_lower
-                or "_tr_" in name_lower
-                or name_lower.startswith("tr_")
-                or name_lower.endswith("_tr.png")
-                or "anchor_tr" in name_lower
-            )
-            if is_top_right:
+            if self._is_tr_anchor_name(name):
                 preferred_templates.append(template)
                 preferred_names.append(name)
-            else:
-                fallback_templates.append(template)
-                fallback_names.append(name)
 
         if preferred_templates:
             self._anchor_templates = preferred_templates
@@ -918,6 +943,69 @@ class ScreenBoardParser:
         self._anchor_templates = templates
         self._anchor_template_names = names
         return self._anchor_templates
+
+    def _load_bl_anchor_templates(self) -> tuple[list[np.ndarray], list[str]]:
+        """Return bottom-left corner anchor templates (lazy-loaded)."""
+        if not self._bl_anchor_templates:
+            self._load_anchor_templates()  # populates BL cache as a side effect
+        return self._bl_anchor_templates, self._bl_anchor_template_names
+
+    def _match_corner_anchor(
+        self,
+        gray: np.ndarray,
+        templates: list[np.ndarray],
+        names: list[str],
+        corner: str,
+    ) -> dict[str, float] | None:
+        """Find the best-scoring template match for one corner type.
+
+        Returns a dict with keys ``reference_x``, ``reference_y``, ``score``,
+        or ``None`` when no template scores above the minimum threshold.
+        """
+        _MIN_SCORE = 0.52
+        best_score = -1.0
+        best: dict[str, float] | None = None
+        for template, _name in zip(templates, names):
+            ah, aw = template.shape[:2]
+            if aw > gray.shape[1] or ah > gray.shape[0]:
+                continue
+            response = cv2.matchTemplate(gray, template, cv2.TM_CCOEFF_NORMED)
+            _, max_val, _, max_loc = cv2.minMaxLoc(response)
+            if max_val > best_score:
+                best_score = float(max_val)
+                tlx, tly = float(max_loc[0]), float(max_loc[1])
+                if corner == "top-right":
+                    ref_x, ref_y = tlx + float(aw), tly
+                else:  # bottom-left
+                    ref_x, ref_y = tlx, tly + float(ah)
+                best = {"reference_x": ref_x, "reference_y": ref_y, "score": best_score}
+        return best if best is not None and best_score >= _MIN_SCORE else None
+
+    def find_board_corner_rect(self, image_path: str) -> tuple[int, int, int, int] | None:
+        """Match top-right and bottom-left anchor templates and return the board bounding box.
+
+        Returns ``(left, top, right, bottom)`` in image pixels if both corners are
+        found with sufficient confidence, otherwise ``None``.
+        """
+        gray = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+        if gray is None:
+            return None
+        tr_templates = self._load_anchor_templates()
+        tr_names = self._anchor_template_names
+        bl_templates, bl_names = self._load_bl_anchor_templates()
+        if not tr_templates or not bl_templates:
+            return None
+        tr = self._match_corner_anchor(gray, tr_templates, tr_names, "top-right")
+        bl = self._match_corner_anchor(gray, bl_templates, bl_names, "bottom-left")
+        if tr is None or bl is None:
+            return None
+        left = int(round(bl["reference_x"]))
+        top = int(round(tr["reference_y"]))
+        right = int(round(tr["reference_x"]))
+        bottom = int(round(bl["reference_y"]))
+        if right <= left or bottom <= top:
+            return None
+        return (left, top, right, bottom)
 
     def _load_templates_by_keyword(self, keyword: str) -> tuple[list[np.ndarray], list[str]]:
         repo_root = Path(__file__).resolve().parents[3]
