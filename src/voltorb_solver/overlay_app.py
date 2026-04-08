@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QSplitter,
     QTextEdit,
     QVBoxLayout,
@@ -35,6 +36,8 @@ from voltorb_solver.game_state import GameState
 from voltorb_solver.image_import.parser import ImageParser, TileDebugArtifacts
 from voltorb_solver.image_import.screen_parser import Region, ScreenBoardParser
 from voltorb_solver.solver import solve_game_state
+from voltorb_solver.stats import StatsManager
+from voltorb_solver.ui.stats_panel import StatsPanel
 
 try:
     import cv2 as _cv2  # type: ignore
@@ -763,6 +766,7 @@ class OverlayControlWindow(QMainWindow):
         config_content_layout.addLayout(config_row2)
 
         config_layout.addWidget(self.config_content)
+        self.config_content.setVisible(False)
         layout.addWidget(config_card)
 
         # ── Debug section (collapsible) ───────────────────────────────────────
@@ -1067,7 +1071,22 @@ class OverlayControlWindow(QMainWindow):
         debug_card_layout.addWidget(self.debug_content)
         layout.addWidget(debug_card)
 
+        # ── Statistics card ──────────────────────────────────────────────────────────────
+        stats_card = QFrame()
+        stats_card.setObjectName("Card")
+        stats_card_layout = QVBoxLayout(stats_card)
+        stats_card_layout.setContentsMargins(14, 12, 14, 12)
+        stats_card_layout.setSpacing(8)
+        stats_card_header = QLabel("Statistics")
+        stats_card_header.setObjectName("FieldLabel")
+        stats_card_layout.addWidget(stats_card_header)
+        self.stats_panel = StatsPanel()
+        stats_card_layout.addWidget(self.stats_panel)
+        layout.addWidget(stats_card)
+
         layout.addStretch(1)
+
+        self.stats = StatsManager()
 
         self._apply_styles()
         self._update_target_window_button()
@@ -2139,11 +2158,15 @@ class OverlayControlWindow(QMainWindow):
             self.simple_overlay.hide()
         if is_clear:
             self._set_status("  Game Clear detected — waiting for Play Level prompt…", "success")
+            self.stats.record_win()
+            self.stats_panel.refresh(self.stats.lifetime, self.stats.session)
             self._play_dialog_steps = 0
             QTimer.singleShot(self._play_dialog_delay_ms, self._play_wait_for_play_level)
             return
         if is_failed:
             self._set_status("  Game Failed (voltorb!) detected — advancing to Play Level prompt…", "warning")
+            self.stats.record_bomb()
+            self.stats_panel.refresh(self.stats.lifetime, self.stats.session)
             self._play_dialog_steps = 0
             QTimer.singleShot(self._play_dialog_delay_ms, self._play_wait_for_play_level_after_fail)
             return
