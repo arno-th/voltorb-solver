@@ -554,7 +554,7 @@ class OverlayControlWindow(QMainWindow):
 
         runtime_btn_row = QHBoxLayout()
         runtime_btn_row.setSpacing(8)
-        self.start_play_btn = QPushButton("Start & Play")
+        self.start_play_btn = QPushButton("Start + Play")
         self.start_play_btn.setObjectName("PrimaryButton")
         self.start_play_btn.clicked.connect(self._start_and_play)
         self.refresh_tiles_btn = QPushButton("Refresh Tiles")
@@ -1516,7 +1516,7 @@ class OverlayControlWindow(QMainWindow):
             self._show_error("No target window selected. Use 'Pick Target Window' first.")
             return
         if shutil.which("xdotool") is None:
-            self._show_error("`xdotool` not found. Install xdotool to use Start & Play.")
+            self._show_error("`xdotool` not found. Install xdotool to use Start + Play.")
             return
 
         if not _TEXTBOX_TEMPLATE_PATH.exists():
@@ -1691,7 +1691,7 @@ class OverlayControlWindow(QMainWindow):
     def _play_stop(self, reason: str = "Play Level complete.", level: str = "info") -> None:
         """Stop the state machine and reset the button."""
         self._play_level_running = False
-        self.start_play_btn.setText("Start & Play")
+        self.start_play_btn.setText("Start + Play")
         # Restore overlays in case they were hidden during a dialog sequence.
         if self.overlay_btn.isChecked():
             self.x11_overlay.show()
@@ -1826,7 +1826,7 @@ class OverlayControlWindow(QMainWindow):
         if has_play_level:
             self._set_status("  Play Level prompt detected — game clear complete.", "success")
             self._play_level_running = False
-            self.start_play_btn.setText("Start & Play")
+            self.start_play_btn.setText("Start + Play")
             return
 
         if ds >= MAX_WAIT_STEPS:
@@ -1862,7 +1862,7 @@ class OverlayControlWindow(QMainWindow):
 
     # ── Start from Play Level dialog ─────────────────────────────────────────
     #
-    # Called when Start & Play detects the Play Level prompt before the board
+    # Called when Start + Play detects the Play Level prompt before the board
     # is visible.  Clicks the prompt to launch the next game, then waits for
     # the board to load before entering the tile-click loop.
 
