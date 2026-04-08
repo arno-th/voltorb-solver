@@ -525,7 +525,7 @@ class OverlayControlWindow(QMainWindow):
         self._hotkey_sequence = QKeySequence("P")
         self._hotkey_shortcut: QShortcut | None = None
         self._global_hotkey = _GlobalHotkeyListener(self._hotkey_activated.emit)
-        self._hotkey_activated.connect(self._start_and_play)
+        self._hotkey_activated.connect(self._on_hotkey_triggered)
         self._play_click_done.connect(self._play_after_click)
         self._anchor_board_rect: tuple[int, int, int, int] | None = None  # (left, top, right, bottom) image px
         self._anchor_image_size: tuple[int, int] | None = None
@@ -1066,11 +1066,17 @@ class OverlayControlWindow(QMainWindow):
         if not self._hotkey_sequence.isEmpty():
             self._hotkey_shortcut = QShortcut(self._hotkey_sequence, self)
             self._hotkey_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
-            self._hotkey_shortcut.activated.connect(self._start_and_play)
+            self._hotkey_shortcut.activated.connect(self._on_hotkey_triggered)
 
         # Global listener (works even when the emulator window has focus).
         if _pynput_kb is not None:
             self._global_hotkey.set_key_sequence(self._hotkey_sequence)
+
+    def _on_hotkey_triggered(self) -> None:
+        # Ignore triggers while recording a new shortcut.
+        if hasattr(self, "hotkey_edit") and self.hotkey_edit.hasFocus():
+            return
+        self._start_and_play()
 
     def _on_hotkey_changed(self, seq: QKeySequence) -> None:
         self._hotkey_sequence = seq
