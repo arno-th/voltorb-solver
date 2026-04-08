@@ -606,46 +606,6 @@ class OverlayControlWindow(QMainWindow):
         splitter.addWidget(bottom_pane)
         splitter.setSizes([200, 400])
 
-        monitor_card = QFrame()
-        monitor_card.setObjectName("Card")
-        monitor_layout = QVBoxLayout(monitor_card)
-        monitor_layout.setContentsMargins(14, 12, 14, 12)
-        monitor_layout.setSpacing(8)
-
-        monitor_row = QHBoxLayout()
-        monitor_row.setSpacing(8)
-        monitor_label = QLabel("Capture/Overlay Monitor")
-        monitor_label.setObjectName("FieldLabel")
-        monitor_row.addWidget(monitor_label)
-        self.monitor_combo = QComboBox()
-        self.monitor_combo.setObjectName("MonitorCombo")
-        self.monitor_combo.currentIndexChanged.connect(self._on_monitor_changed)
-        monitor_row.addWidget(self.monitor_combo)
-        self.refresh_monitors_btn = QPushButton("Refresh Monitors")
-        self.refresh_monitors_btn.setObjectName("SecondaryButton")
-        self.refresh_monitors_btn.clicked.connect(self._refresh_monitor_list)
-        monitor_row.addWidget(self.refresh_monitors_btn)
-        monitor_layout.addLayout(monitor_row)
-
-        self.monitor_hint = QLabel("No monitor selected.")
-        self.monitor_hint.setObjectName("HintLabel")
-        self.monitor_hint.setWordWrap(True)
-        monitor_layout.addWidget(self.monitor_hint)
-
-        window_row = QHBoxLayout()
-        window_row.setSpacing(8)
-        self.target_window_btn = QPushButton("Pick Target Window")
-        self.target_window_btn.setObjectName("SecondaryButton")
-        self.target_window_btn.clicked.connect(self._handle_target_window_button)
-        window_row.addWidget(self.target_window_btn)
-        self.window_name_label = QLabel("No window selected.")
-        self.window_name_label.setObjectName("HintLabel")
-        self.window_name_label.setWordWrap(False)
-        window_row.addWidget(self.window_name_label, 1)
-        monitor_layout.addLayout(window_row)
-
-        layout.addWidget(monitor_card)
-
         # ── Runtime section ──────────────────────────────────────────────────
         runtime_card = QFrame()
         runtime_card.setObjectName("Card")
@@ -682,17 +642,64 @@ class OverlayControlWindow(QMainWindow):
 
         layout.addWidget(runtime_card)
 
-        # ── Configuration section ────────────────────────────────────────────
+        # ── Configuration section (collapsible) ──────────────────────────────
         config_card = QFrame()
         config_card.setObjectName("Card")
         config_layout = QVBoxLayout(config_card)
         config_layout.setContentsMargins(14, 12, 14, 12)
-        config_layout.setSpacing(8)
+        config_layout.setSpacing(6)
 
-        config_header = QLabel("Configuration")
-        config_header.setObjectName("FieldLabel")
-        config_layout.addWidget(config_header)
+        config_header_row = QHBoxLayout()
+        config_header_row.setSpacing(8)
+        config_header_label = QLabel("Configuration")
+        config_header_label.setObjectName("FieldLabel")
+        config_header_row.addWidget(config_header_label)
+        config_header_row.addStretch(1)
+        self.config_toggle_btn = QPushButton("\u25bc Hide")
+        self.config_toggle_btn.setObjectName("SecondaryButton")
+        self.config_toggle_btn.clicked.connect(self._toggle_config_section)
+        config_header_row.addWidget(self.config_toggle_btn)
+        config_layout.addLayout(config_header_row)
 
+        self.config_content = QWidget()
+        config_content_layout = QVBoxLayout(self.config_content)
+        config_content_layout.setContentsMargins(0, 4, 0, 0)
+        config_content_layout.setSpacing(8)
+
+        # Monitor selection
+        monitor_row = QHBoxLayout()
+        monitor_row.setSpacing(8)
+        monitor_label = QLabel("Capture/Overlay Monitor")
+        monitor_label.setObjectName("FieldLabel")
+        monitor_row.addWidget(monitor_label)
+        self.monitor_combo = QComboBox()
+        self.monitor_combo.setObjectName("MonitorCombo")
+        self.monitor_combo.currentIndexChanged.connect(self._on_monitor_changed)
+        monitor_row.addWidget(self.monitor_combo)
+        self.refresh_monitors_btn = QPushButton("Refresh Monitors")
+        self.refresh_monitors_btn.setObjectName("SecondaryButton")
+        self.refresh_monitors_btn.clicked.connect(self._refresh_monitor_list)
+        monitor_row.addWidget(self.refresh_monitors_btn)
+        config_content_layout.addLayout(monitor_row)
+
+        self.monitor_hint = QLabel("No monitor selected.")
+        self.monitor_hint.setObjectName("HintLabel")
+        self.monitor_hint.setWordWrap(True)
+        config_content_layout.addWidget(self.monitor_hint)
+
+        window_row = QHBoxLayout()
+        window_row.setSpacing(8)
+        self.target_window_btn = QPushButton("Pick Target Window")
+        self.target_window_btn.setObjectName("SecondaryButton")
+        self.target_window_btn.clicked.connect(self._handle_target_window_button)
+        window_row.addWidget(self.target_window_btn)
+        self.window_name_label = QLabel("No window selected.")
+        self.window_name_label.setObjectName("HintLabel")
+        self.window_name_label.setWordWrap(False)
+        window_row.addWidget(self.window_name_label, 1)
+        config_content_layout.addLayout(window_row)
+
+        # Timing delays
         config_row1 = QHBoxLayout()
         config_row1.setSpacing(8)
 
@@ -740,7 +747,7 @@ class OverlayControlWindow(QMainWindow):
         config_row1.addWidget(poll_delay_label)
         config_row1.addWidget(self.poll_delay_spin)
         config_row1.addStretch(1)
-        config_layout.addLayout(config_row1)
+        config_content_layout.addLayout(config_row1)
 
         config_row2 = QHBoxLayout()
         config_row2.setSpacing(8)
@@ -753,8 +760,9 @@ class OverlayControlWindow(QMainWindow):
         config_row2.addWidget(hotkey_label)
         config_row2.addWidget(self.hotkey_edit)
         config_row2.addStretch(1)
-        config_layout.addLayout(config_row2)
+        config_content_layout.addLayout(config_row2)
 
+        config_layout.addWidget(self.config_content)
         layout.addWidget(config_card)
 
         # ── Debug section (collapsible) ───────────────────────────────────────
@@ -1226,6 +1234,11 @@ class OverlayControlWindow(QMainWindow):
             }
             """
         )
+
+    def _toggle_config_section(self) -> None:
+        visible = self.config_content.isVisible()
+        self.config_content.setVisible(not visible)
+        self.config_toggle_btn.setText("\u25bc Hide" if not visible else "\u25b6 Show")
 
     def _toggle_debug_section(self) -> None:
         visible = self.debug_content.isVisible()
