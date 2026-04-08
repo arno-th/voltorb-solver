@@ -436,7 +436,9 @@ class OverlayControlWindow(QMainWindow):
         self._play_level_running = False
         self._play_iteration = 0
         self._play_dialog_steps = 0
-        self._play_click_delay_ms = 800
+        self._play_click_delay_ms = 500
+        self._play_dialog_delay_ms = 500
+        self._play_poll_delay_ms = 500
         self._play_click_done.connect(self._play_after_click)
         self._anchor_board_rect: tuple[int, int, int, int] | None = None  # (left, top, right, bottom) image px
         self._anchor_image_size: tuple[int, int] | None = None
@@ -580,6 +582,55 @@ class OverlayControlWindow(QMainWindow):
         runtime_btn_row.addStretch(1)
         runtime_layout.addLayout(runtime_btn_row)
         layout.addWidget(runtime_card)
+
+        # ── Timing section ───────────────────────────────────────────────────
+        timing_card = QFrame()
+        timing_card.setObjectName("Card")
+        timing_layout = QVBoxLayout(timing_card)
+        timing_layout.setContentsMargins(14, 12, 14, 12)
+        timing_layout.setSpacing(8)
+
+        timing_header = QLabel("Timing")
+        timing_header.setObjectName("FieldLabel")
+        timing_layout.addWidget(timing_header)
+
+        timing_row = QHBoxLayout()
+        timing_row.setSpacing(8)
+
+        dialog_delay_label = QLabel("Dialog advance delay:")
+        self.dialog_delay_spin = QSpinBox()
+        self.dialog_delay_spin.setRange(100, 5000)
+        self.dialog_delay_spin.setSingleStep(100)
+        self.dialog_delay_spin.setValue(self._play_dialog_delay_ms)
+        self.dialog_delay_spin.setSuffix(" ms")
+        self.dialog_delay_spin.setToolTip(
+            "Delay between dialog-advance clicks and after detecting Game Clear"
+        )
+        self.dialog_delay_spin.valueChanged.connect(
+            lambda v: setattr(self, '_play_dialog_delay_ms', v)
+        )
+
+        poll_delay_label = QLabel("Play Level poll interval:")
+        self.poll_delay_spin = QSpinBox()
+        self.poll_delay_spin.setRange(100, 5000)
+        self.poll_delay_spin.setSingleStep(100)
+        self.poll_delay_spin.setValue(self._play_poll_delay_ms)
+        self.poll_delay_spin.setSuffix(" ms")
+        self.poll_delay_spin.setToolTip(
+            "Interval between clicks while waiting for the Play Level prompt after Game Clear"
+        )
+        self.poll_delay_spin.valueChanged.connect(
+            lambda v: setattr(self, '_play_poll_delay_ms', v)
+        )
+
+        timing_row.addWidget(dialog_delay_label)
+        timing_row.addWidget(self.dialog_delay_spin)
+        timing_row.addSpacing(16)
+        timing_row.addWidget(poll_delay_label)
+        timing_row.addWidget(self.poll_delay_spin)
+        timing_row.addStretch(1)
+        timing_layout.addLayout(timing_row)
+        layout.addWidget(timing_card)
 
         # ── Debug section (collapsible) ───────────────────────────────────────
         debug_card = QFrame()
@@ -1768,9 +1819,11 @@ class OverlayControlWindow(QMainWindow):
         ds = self._play_dialog_steps
 
         self._set_status(f"  Step {step} dialog {ds}: checking for textbox…")
-        has_textbox = self._play_check_template_now(
-            self._get_textbox_region()[0], _TEXTBOX_TEMPLATE_PATH, _TEXTBOX_MATCH_THRESHOLD,
-        )
+        # Capture the screen once and run both template checks in a single pass.
+        has_textbox, is_clear = self._play_check_templates_now([
+            (self._get_textbox_region()[0], _TEXTBOX_TEMPLATE_PATH, _TEXTBOX_MATCH_THRESHOLD),
+            (self._get_game_clear_region()[0], _TEXTBOX_GAME_CLEAR_TEMPLATE_PATH, _TEXTBOX_GAME_CLEAR_MATCH_THRESHOLD),
+        ])
 
         if not has_textbox:
             self._set_status(f"  Step {step} dialog {ds}: no textbox — re-evaluating board…")
@@ -1789,15 +1842,10 @@ class OverlayControlWindow(QMainWindow):
         if ds == 1:
             self.x11_overlay.hide()
             self.simple_overlay.hide()
-        is_clear = self._play_check_template_now(
-            self._get_game_clear_region()[0],
-            _TEXTBOX_GAME_CLEAR_TEMPLATE_PATH,
-            _TEXTBOX_GAME_CLEAR_MATCH_THRESHOLD,
-        )
         if is_clear:
             self._set_status("  Game Clear detected — waiting for Play Level prompt…", "success")
             self._play_dialog_steps = 0
-            QTimer.singleShot(500, self._play_wait_for_play_level)
+            QTimer.singleShot(self._play_dialog_delay_ms, self._play_wait_for_play_level)
             return
 
         if ds >= MAX_DIALOG_STEPS:
@@ -1806,7 +1854,7 @@ class OverlayControlWindow(QMainWindow):
 
         self._set_status(f"  Step {step} dialog {ds}: not game clear — advancing dialog…")
         self._play_click_textbox_center()
-        QTimer.singleShot(500, self._play_check_dialog_step)
+        QTimer.singleShot(self._play_dialog_delay_ms, self._play_check_dialog_step)
 
     def _play_wait_for_play_level(self) -> None:
         """After game clear: keep clicking game-clear region centre until Play Level prompt appears."""
@@ -1858,7 +1906,7 @@ class OverlayControlWindow(QMainWindow):
         cx = gx + int(gw * (l_f + r_f) / 2)
         cy = gy + int(gh * (t_f + b_f) / 2)
         self._play_do_xdotool_click(cx, cy, self.state.target_window_id)
-        QTimer.singleShot(500, self._play_wait_for_play_level)
+        QTimer.singleShot(self._play_poll_delay_ms, self._play_wait_for_play_level)
 
     # ── Start from Play Level dialog ─────────────────────────────────────────
     #
@@ -1925,33 +1973,100 @@ class OverlayControlWindow(QMainWindow):
         threshold: float,
     ) -> bool:
         """Template match called directly on the main thread — no threading needed."""
-        if _cv2 is None or not template_path.exists():
-            return False
+        return self._play_check_templates_now([(region, template_path, threshold)])[0]
 
-        result = self._grab_textbox_crop(region)
-        if result is None:
-            return False
-        crop, *_ = result
+    def _play_check_templates_now(
+        self,
+        checks: list[tuple[tuple[float, float, float, float], Path, float]],
+    ) -> list[bool]:
+        """Capture the screen once and match multiple templates in a single pass."""
+        n = len(checks)
+        if _cv2 is None:
+            return [False] * n
 
-        template = _cv2.imread(str(template_path))
-        if template is None:
-            return False
+        if self.state.target_window_id is not None:
+            pixmap = self._capture_window(self.state.target_window_id)
+            use_window_local = True
+        else:
+            screen = self._get_selected_screen()
+            if screen is None:
+                return [False] * n
+            pixmap = screen.grabWindow(0)
+            use_window_local = False
 
-        th, tw = template.shape[:2]
-        ch, cw = crop.shape[:2]
-        if tw > cw or th > ch:
-            scale = min(cw / tw, ch / th)
-            template = _cv2.resize(
-                template,
-                (max(1, int(tw * scale)), max(1, int(th * scale))),
-                interpolation=_cv2.INTER_AREA,
-            )
+        if pixmap is None or pixmap.isNull():
+            return [False] * n
 
-        gray_crop = _cv2.cvtColor(crop, _cv2.COLOR_BGR2GRAY)
-        gray_tpl = _cv2.cvtColor(template, _cv2.COLOR_BGR2GRAY)
-        result_map = _cv2.matchTemplate(gray_crop, gray_tpl, _cv2.TM_CCOEFF_NORMED)
-        _, score, _, _ = _cv2.minMaxLoc(result_map)
-        return score >= threshold
+        tmp_path = str(
+            Path(gettempdir())
+            / f"voltorb_textbox_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.png"
+        )
+        if not pixmap.save(tmp_path):
+            return [False] * n
+
+        image = _cv2.imread(tmp_path)
+        if image is None:
+            return [False] * n
+
+        img_h, img_w = image.shape[:2]
+
+        if use_window_local:
+            gx, gy, gw, gh = 0, 0, img_w, img_h
+        else:
+            screen = self._get_selected_screen()
+            screen_geo = screen.geometry() if screen else None
+            sx = screen_geo.x() if screen_geo else 0
+            sy = screen_geo.y() if screen_geo else 0
+            mapping_rect = self._mapping_rect_for_signature(self._last_capture_signature)
+            if mapping_rect is not None:
+                gx = mapping_rect.x() - sx
+                gy = mapping_rect.y() - sy
+                gw = mapping_rect.width()
+                gh = mapping_rect.height()
+            elif self._last_image_size is not None and screen_geo is not None:
+                mr = _map_image_to_overlay(screen_geo.width(), screen_geo.height(), *self._last_image_size)
+                gx, gy, gw, gh = mr.x(), mr.y(), mr.width(), mr.height()
+            else:
+                gx, gy, gw, gh = 0, 0, img_w, img_h
+
+        results: list[bool] = []
+        for region, template_path, threshold in checks:
+            if not template_path.exists():
+                results.append(False)
+                continue
+
+            l_f, t_f, r_f, b_f = region
+            x0 = max(0, gx + int(gw * l_f))
+            y0 = max(0, gy + int(gh * t_f))
+            x1 = min(img_w, gx + int(gw * r_f))
+            y1 = min(img_h, gy + int(gh * b_f))
+            crop = image[y0:y1, x0:x1]
+            if crop.size == 0:
+                results.append(False)
+                continue
+
+            template = _cv2.imread(str(template_path))
+            if template is None:
+                results.append(False)
+                continue
+
+            th, tw = template.shape[:2]
+            ch, cw = crop.shape[:2]
+            if tw > cw or th > ch:
+                scale = min(cw / tw, ch / th)
+                template = _cv2.resize(
+                    template,
+                    (max(1, int(tw * scale)), max(1, int(th * scale))),
+                    interpolation=_cv2.INTER_AREA,
+                )
+
+            gray_crop = _cv2.cvtColor(crop, _cv2.COLOR_BGR2GRAY)
+            gray_tpl = _cv2.cvtColor(template, _cv2.COLOR_BGR2GRAY)
+            result_map = _cv2.matchTemplate(gray_crop, gray_tpl, _cv2.TM_CCOEFF_NORMED)
+            _, score, _, _ = _cv2.minMaxLoc(result_map)
+            results.append(score >= threshold)
+
+        return results
 
     def _play_find_best_tile(self) -> tuple[str, int, int] | None:
         """Return (tile_name, screen_cx, screen_cy) for the safest useful tile, or None."""
@@ -2203,10 +2318,20 @@ class OverlayControlWindow(QMainWindow):
         self._set_status("Cleared target window. Capture will use selected monitor.", level="info")
 
     def _capture_window(self, window_id: int):
-        # Try each screen; one of them should return the target window content.
+        # Try the selected screen first — it's almost always the right one and
+        # avoids slow grabWindow calls on every other screen.
+        selected = self._get_selected_screen()
+        if selected is not None:
+            pixmap = selected.grabWindow(window_id)
+            if not pixmap.isNull():
+                return pixmap
+
+        # Fall back: try remaining screens and pick the largest capture.
         best_pixmap = None
         best_area = 0
         for screen in QGuiApplication.screens():
+            if screen is selected:
+                continue
             pixmap = screen.grabWindow(window_id)
             if pixmap.isNull():
                 continue
@@ -2216,8 +2341,7 @@ class OverlayControlWindow(QMainWindow):
                 best_pixmap = pixmap
 
         if best_pixmap is None:
-            selected_screen = self._get_selected_screen()
-            return selected_screen.grabWindow(0) if selected_screen else None
+            return selected.grabWindow(0) if selected is not None else None
         return best_pixmap
 
     def _align_monitor_to_target_window(self) -> None:
