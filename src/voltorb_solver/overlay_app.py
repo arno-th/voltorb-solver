@@ -549,21 +549,17 @@ class OverlayControlWindow(QMainWindow):
 
         runtime_btn_row = QHBoxLayout()
         runtime_btn_row.setSpacing(8)
-        self.start_game_btn = QPushButton("Start Game")
-        self.start_game_btn.setObjectName("PrimaryButton")
-        self.start_game_btn.clicked.connect(self._start_game)
+        self.start_play_btn = QPushButton("Start & Play")
+        self.start_play_btn.setObjectName("PrimaryButton")
+        self.start_play_btn.clicked.connect(self._start_and_play)
         self.refresh_tiles_btn = QPushButton("Refresh Tiles")
         self.refresh_tiles_btn.setObjectName("SecondaryButton")
         self.refresh_tiles_btn.clicked.connect(self._refresh_tiles)
-        self.play_level_btn = QPushButton("Play Level")
-        self.play_level_btn.setObjectName("PrimaryButton")
-        self.play_level_btn.clicked.connect(self._play_level)
         self.clear_game_btn = QPushButton("Clear Game")
         self.clear_game_btn.setObjectName("DangerButton")
         self.clear_game_btn.clicked.connect(self.clear_overlay)
-        runtime_btn_row.addWidget(self.start_game_btn)
+        runtime_btn_row.addWidget(self.start_play_btn)
         runtime_btn_row.addWidget(self.refresh_tiles_btn)
-        runtime_btn_row.addWidget(self.play_level_btn)
         runtime_btn_row.addWidget(self.clear_game_btn)
         runtime_btn_row.addStretch(1)
         runtime_layout.addLayout(runtime_btn_row)
@@ -1467,15 +1463,41 @@ class OverlayControlWindow(QMainWindow):
         region, _ = self._get_play_level_region()
         self._capture_textbox_template_for(region, _TEXTBOX_PLAY_LEVEL_TEMPLATE_PATH, "Play Level")
 
-    def _start_game(self) -> None:
+    def _start_and_play(self) -> None:
+        """Parse the board then immediately begin automated play. Click again to stop."""
+        if self._play_level_running:
+            self._play_stop("Play Level stopped by user.")
+            return
+
         if self.state.target_window_id is None:
             self._show_error("No target window selected. Use 'Pick Target Window' first.")
             return
+        if shutil.which("xdotool") is None:
+            self._show_error("`xdotool` not found. Install xdotool to use Start & Play.")
+            return
+
         self.relabel_regions()
         self.parse_all_clues()
         self.parse_tiles()
         if not self.prob_overlay_btn.isChecked():
             self.prob_overlay_btn.setChecked(True)
+
+        if not [r for r in self._last_parse_regions if self._is_tile_region(r.name)]:
+            self._show_error("No tile regions found after parsing.")
+            return
+
+        self._play_level_running = True
+        self._play_iteration = 0
+        self._play_dialog_steps = 0
+        self.start_play_btn.setText("Stop Play")
+
+        if not _TEXTBOX_TEMPLATE_PATH.exists():
+            self._set_status("Warning: textbox template not found — dialog detection disabled.", "warning")
+        if not _TEXTBOX_GAME_CLEAR_TEMPLATE_PATH.exists():
+            self._set_status("Warning: game-clear template not found — completion detection disabled.", "warning")
+
+        self._set_status("Play Level started…", "info")
+        QTimer.singleShot(0, self._play_step)
 
     def _click_best_tile(self) -> None:
         if self._last_capture_signature is None or self._last_image_size is None:
@@ -1594,39 +1616,12 @@ class OverlayControlWindow(QMainWindow):
     # main thread.  This avoids the QTimer-from-background-thread pitfall where
     # singleShot callbacks are posted to a non-existent event loop.
 
-    def _play_level(self) -> None:
-        """Toggle automated level play."""
-        if self._play_level_running:
-            self._play_stop("Play Level stopped by user.")
-            return
 
-        if self._last_capture_signature is None or self._last_image_size is None:
-            self._show_error("No game parsed yet. Use 'Start Game' first.")
-            return
-        if shutil.which("xdotool") is None:
-            self._show_error("`xdotool` not found. Install xdotool to use Play Level.")
-            return
-        if not [r for r in self._last_parse_regions if self._is_tile_region(r.name)]:
-            self._show_error("No tile regions found. Run 'Start Game' first.")
-            return
-
-        self._play_level_running = True
-        self._play_iteration = 0
-        self._play_dialog_steps = 0
-        self.play_level_btn.setText("Stop Play")
-
-        if not _TEXTBOX_TEMPLATE_PATH.exists():
-            self._set_status("Warning: textbox template not found — dialog detection disabled.", "warning")
-        if not _TEXTBOX_GAME_CLEAR_TEMPLATE_PATH.exists():
-            self._set_status("Warning: game-clear template not found — completion detection disabled.", "warning")
-
-        self._set_status("Play Level started…", "info")
-        QTimer.singleShot(0, self._play_step)
 
     def _play_stop(self, reason: str = "Play Level complete.", level: str = "info") -> None:
         """Stop the state machine and reset the button."""
         self._play_level_running = False
-        self.play_level_btn.setText("Play Level")
+        self.start_play_btn.setText("Start & Play")
         # Restore overlays in case they were hidden during a dialog sequence.
         if self.overlay_btn.isChecked():
             self.x11_overlay.show()
@@ -1760,7 +1755,7 @@ class OverlayControlWindow(QMainWindow):
         if has_play_level:
             self._set_status("  Play Level prompt detected — game clear complete.", "success")
             self._play_level_running = False
-            self.play_level_btn.setText("Play Level")
+            self.start_play_btn.setText("Start & Play")
             return
 
         if ds >= MAX_WAIT_STEPS:
