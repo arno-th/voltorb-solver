@@ -94,7 +94,7 @@ class _GlobalHotkeyListener:
 
     @classmethod
     def _qt_to_pynput(cls, qt_str: str) -> str:
-        """Convert a Qt PortableText key sequence like 'Ctrl+F9' to '<ctrl>+<f9>'."""
+        """Convert a Qt PortableText key sequence like 'Ctrl+P' to '<ctrl>+<P>'."""
         if not qt_str:
             return ""
         parts = []
@@ -521,7 +521,8 @@ class OverlayControlWindow(QMainWindow):
         self._play_click_delay_ms = 500
         self._play_dialog_delay_ms = 500
         self._play_poll_delay_ms = 500
-        self._hotkey_sequence = QKeySequence("F9")
+        self._play_forever = False
+        self._hotkey_sequence = QKeySequence("P")
         self._hotkey_shortcut: QShortcut | None = None
         self._global_hotkey = _GlobalHotkeyListener(self._hotkey_activated.emit)
         self._hotkey_activated.connect(self._start_and_play)
@@ -658,6 +659,12 @@ class OverlayControlWindow(QMainWindow):
         runtime_btn_row.addWidget(self.start_play_btn)
         runtime_btn_row.addWidget(self.refresh_tiles_btn)
         runtime_btn_row.addWidget(self.clear_game_btn)
+        self.forever_loop_chk = QCheckBox("Forever loop")
+        self.forever_loop_chk.setToolTip("Automatically start a new game when Play Level prompt is found")
+        self.forever_loop_chk.setChecked(self._play_forever)
+        self.forever_loop_chk.toggled.connect(lambda v: setattr(self, '_play_forever', v))
+        runtime_btn_row.addSpacing(12)
+        runtime_btn_row.addWidget(self.forever_loop_chk)
         runtime_btn_row.addStretch(1)
         runtime_layout.addLayout(runtime_btn_row)
 
@@ -2125,9 +2132,15 @@ class OverlayControlWindow(QMainWindow):
         )
 
         if has_play_level:
-            self._set_status("  Play Level prompt detected after game failed — stopping.", "warning")
-            self._play_level_running = False
-            self.start_play_btn.setText("Start + Play")
+            if self._play_forever:
+                self._set_status("  Play Level prompt detected after game failed — starting new game…", "warning")
+                self._play_iteration = 0
+                self._play_dialog_steps = 0
+                QTimer.singleShot(0, self._play_start_from_play_level)
+            else:
+                self._set_status("  Play Level prompt detected after game failed — stopping.", "warning")
+                self._play_level_running = False
+                self.start_play_btn.setText("Start + Play")
             return
 
         if ds >= MAX_WAIT_STEPS:
@@ -2177,9 +2190,15 @@ class OverlayControlWindow(QMainWindow):
         )
 
         if has_play_level:
-            self._set_status("  Play Level prompt detected — game clear complete.", "success")
-            self._play_level_running = False
-            self.start_play_btn.setText("Start + Play")
+            if self._play_forever:
+                self._set_status("  Play Level prompt detected — starting new game…", "success")
+                self._play_iteration = 0
+                self._play_dialog_steps = 0
+                QTimer.singleShot(0, self._play_start_from_play_level)
+            else:
+                self._set_status("  Play Level prompt detected — game clear complete.", "success")
+                self._play_level_running = False
+                self.start_play_btn.setText("Start + Play")
             return
 
         if ds >= MAX_WAIT_STEPS:
