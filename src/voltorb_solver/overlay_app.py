@@ -94,6 +94,16 @@ _TEXTBOX_PLAY_LEVEL_BOARD_Y = 0.8
 _TEXTBOX_PLAY_LEVEL_BOARD_W = 0.386
 _TEXTBOX_PLAY_LEVEL_BOARD_H = 0.13
 
+_TEXTBOX_GAME_FAILED_REGION = (0.07, 0.9, 0.2, 0.935)
+_TEXTBOX_GAME_FAILED_TEMPLATE_PATH = Path("assets/templates/textbox_game_failed.png")
+_TEXTBOX_GAME_FAILED_MATCH_THRESHOLD = 0.90
+
+# Game-failed textbox board-relative defaults (x, y, w, h fractions of board).
+_TEXTBOX_GAME_FAILED_BOARD_X = 0.014
+_TEXTBOX_GAME_FAILED_BOARD_Y = 0.8
+_TEXTBOX_GAME_FAILED_BOARD_W = 0.386
+_TEXTBOX_GAME_FAILED_BOARD_H = 0.13
+
 
 def _bind_widget_to_screen(widget: QWidget, screen) -> None:
     if screen is None:
@@ -456,6 +466,10 @@ class OverlayControlWindow(QMainWindow):
         self._play_level_y = _TEXTBOX_PLAY_LEVEL_BOARD_Y
         self._play_level_w = _TEXTBOX_PLAY_LEVEL_BOARD_W
         self._play_level_h = _TEXTBOX_PLAY_LEVEL_BOARD_H
+        self._game_failed_x = _TEXTBOX_GAME_FAILED_BOARD_X
+        self._game_failed_y = _TEXTBOX_GAME_FAILED_BOARD_Y
+        self._game_failed_w = _TEXTBOX_GAME_FAILED_BOARD_W
+        self._game_failed_h = _TEXTBOX_GAME_FAILED_BOARD_H
         self._load_textbox_offsets()
 
         root = QWidget()
@@ -880,6 +894,56 @@ class OverlayControlWindow(QMainWindow):
             spin.valueChanged.connect(self._on_play_level_offsets_changed)
         debug_content_layout.addLayout(pl_offsets_row)
 
+        textbox_game_failed_label = QLabel("Game Failed Text-box")
+        textbox_game_failed_label.setObjectName("FieldLabel")
+        debug_content_layout.addWidget(textbox_game_failed_label)
+
+        textbox_game_failed_row = QHBoxLayout()
+        textbox_game_failed_row.setSpacing(8)
+        self.check_textbox_game_failed_btn = QPushButton("Check Text Box")
+        self.check_textbox_game_failed_btn.setObjectName("PrimaryButton")
+        self.check_textbox_game_failed_btn.clicked.connect(self._check_textbox_game_failed_template)
+        self.save_textbox_game_failed_tpl_btn = QPushButton("Save as Template")
+        self.save_textbox_game_failed_tpl_btn.setObjectName("SecondaryButton")
+        self.save_textbox_game_failed_tpl_btn.clicked.connect(self._capture_textbox_game_failed_template)
+        self.show_textbox_game_failed_region_btn = QPushButton("Show Region")
+        self.show_textbox_game_failed_region_btn.setObjectName("SecondaryButton")
+        self.show_textbox_game_failed_region_btn.clicked.connect(self._show_textbox_game_failed_region_overlay)
+        textbox_game_failed_row.addWidget(self.check_textbox_game_failed_btn)
+        textbox_game_failed_row.addWidget(self.save_textbox_game_failed_tpl_btn)
+        textbox_game_failed_row.addWidget(self.show_textbox_game_failed_region_btn)
+        textbox_game_failed_row.addStretch(1)
+        debug_content_layout.addLayout(textbox_game_failed_row)
+
+        gf_offsets_row = QHBoxLayout()
+        gf_offsets_row.setSpacing(6)
+        for attr, label_text in (
+            ("game_failed_x_spin", "X:"),
+            ("game_failed_y_spin", "Y:"),
+            ("game_failed_w_spin", "W:"),
+            ("game_failed_h_spin", "H:"),
+        ):
+            lbl = QLabel(label_text)
+            lbl.setObjectName("FieldLabel")
+            gf_offsets_row.addWidget(lbl)
+            spin = QDoubleSpinBox()
+            spin.setRange(-3.0, 5.0)
+            spin.setSingleStep(0.01)
+            spin.setDecimals(3)
+            spin.setFixedWidth(72)
+            spin.setToolTip("Board-relative fraction: origin (0,0) = board top-left, (1,1) = board bottom-right")
+            setattr(self, attr, spin)
+            gf_offsets_row.addWidget(spin)
+        gf_offsets_row.addStretch(1)
+        self.game_failed_x_spin.setValue(self._game_failed_x)
+        self.game_failed_y_spin.setValue(self._game_failed_y)
+        self.game_failed_w_spin.setValue(self._game_failed_w)
+        self.game_failed_h_spin.setValue(self._game_failed_h)
+        for spin in (self.game_failed_x_spin, self.game_failed_y_spin,
+                     self.game_failed_w_spin, self.game_failed_h_spin):
+            spin.valueChanged.connect(self._on_game_failed_offsets_changed)
+        debug_content_layout.addLayout(gf_offsets_row)
+
         self.debug_content.setVisible(False)
         debug_card_layout.addWidget(self.debug_content)
         layout.addWidget(debug_card)
@@ -1206,6 +1270,10 @@ class OverlayControlWindow(QMainWindow):
         region, is_fallback = self._get_play_level_region()
         self._show_textbox_region_overlay_for(region, QColor(200, 255, 80), "Play Level", is_fallback)
 
+    def _show_textbox_game_failed_region_overlay(self) -> None:
+        region, is_fallback = self._get_game_failed_region()
+        self._show_textbox_region_overlay_for(region, QColor(255, 120, 50), "Game Failed", is_fallback)
+
     # ── Text-box detection ───────────────────────────────────────────────────
 
     def _grab_textbox_crop(self, region: tuple[float, float, float, float]) -> tuple["np.ndarray", str, tuple[int, int, int, int], tuple[int, int]] | None:  # type: ignore[name-defined]
@@ -1390,6 +1458,10 @@ class OverlayControlWindow(QMainWindow):
             self._play_level_y = float(data.get("pl_y", self._play_level_y))
             self._play_level_w = float(data.get("pl_w", self._play_level_w))
             self._play_level_h = float(data.get("pl_h", self._play_level_h))
+            self._game_failed_x = float(data.get("gf_x", self._game_failed_x))
+            self._game_failed_y = float(data.get("gf_y", self._game_failed_y))
+            self._game_failed_w = float(data.get("gf_w", self._game_failed_w))
+            self._game_failed_h = float(data.get("gf_h", self._game_failed_h))
         except Exception:
             pass
 
@@ -1410,6 +1482,10 @@ class OverlayControlWindow(QMainWindow):
             "pl_y": self._play_level_y,
             "pl_w": self._play_level_w,
             "pl_h": self._play_level_h,
+            "gf_x": self._game_failed_x,
+            "gf_y": self._game_failed_y,
+            "gf_w": self._game_failed_w,
+            "gf_h": self._game_failed_h,
         }
         self._textbox_offsets_path.write_text(json.dumps(data, indent=2))
 
@@ -1432,6 +1508,13 @@ class OverlayControlWindow(QMainWindow):
         self._play_level_y = self.play_level_y_spin.value()
         self._play_level_w = self.play_level_w_spin.value()
         self._play_level_h = self.play_level_h_spin.value()
+        self._save_textbox_offsets()
+
+    def _on_game_failed_offsets_changed(self) -> None:
+        self._game_failed_x = self.game_failed_x_spin.value()
+        self._game_failed_y = self.game_failed_y_spin.value()
+        self._game_failed_w = self.game_failed_w_spin.value()
+        self._game_failed_h = self.game_failed_h_spin.value()
         self._save_textbox_offsets()
 
     def _get_textbox_region(self) -> tuple[tuple[float, float, float, float], bool]:
@@ -1533,6 +1616,39 @@ class OverlayControlWindow(QMainWindow):
 
         return _TEXTBOX_PLAY_LEVEL_REGION, True
 
+    def _get_game_failed_region(self) -> tuple[tuple[float, float, float, float], bool]:
+        """Return (region, is_fallback). Prefers anchor rect; falls back to tile-based or hardcoded."""
+        anchor = self._board_region_from_anchor(
+            self._game_failed_x, self._game_failed_y, self._game_failed_w, self._game_failed_h,
+        )
+        if anchor is not None:
+            return anchor
+
+        tile_regions = [r for r in self._last_parse_regions if self._is_tile_region(r.name)]
+        if tile_regions and self._last_image_size is not None:
+            img_w, img_h = self._last_image_size
+            if img_w > 0 and img_h > 0:
+                board_left = min(r.x for r in tile_regions)
+                board_top = min(r.y for r in tile_regions)
+                board_right = max(r.x + r.w for r in tile_regions)
+                board_bottom = max(r.y + r.h for r in tile_regions)
+                board_w = board_right - board_left
+                board_h = board_bottom - board_top
+
+                x0 = board_left + int(self._game_failed_x * board_w)
+                y0 = board_top + int(self._game_failed_y * board_h)
+                x1 = x0 + int(self._game_failed_w * board_w)
+                y1 = y0 + int(self._game_failed_h * board_h)
+
+                x0 = max(0, min(x0, img_w - 1))
+                x1 = max(x0 + 1, min(x1, img_w))
+                y0 = max(0, min(y0, img_h - 1))
+                y1 = max(y0 + 1, min(y1, img_h))
+
+                return (x0 / img_w, y0 / img_h, x1 / img_w, y1 / img_h), False
+
+        return _TEXTBOX_GAME_FAILED_REGION, True
+
     def _check_textbox_template(self) -> None:
         region, _ = self._get_textbox_region()
         self._check_textbox_template_for(region, _TEXTBOX_TEMPLATE_PATH, _TEXTBOX_MATCH_THRESHOLD, "Textbox 1")
@@ -1556,6 +1672,14 @@ class OverlayControlWindow(QMainWindow):
     def _capture_textbox_play_level_template(self) -> None:
         region, _ = self._get_play_level_region()
         self._capture_textbox_template_for(region, _TEXTBOX_PLAY_LEVEL_TEMPLATE_PATH, "Play Level")
+
+    def _check_textbox_game_failed_template(self) -> None:
+        region, _ = self._get_game_failed_region()
+        self._check_textbox_template_for(region, _TEXTBOX_GAME_FAILED_TEMPLATE_PATH, _TEXTBOX_GAME_FAILED_MATCH_THRESHOLD, "Game Failed")
+
+    def _capture_textbox_game_failed_template(self) -> None:
+        region, _ = self._get_game_failed_region()
+        self._capture_textbox_template_for(region, _TEXTBOX_GAME_FAILED_TEMPLATE_PATH, "Game Failed")
 
     def _start_and_play(self) -> None:
         """Parse the board then immediately begin automated play. Click again to stop."""
@@ -1819,10 +1943,11 @@ class OverlayControlWindow(QMainWindow):
         ds = self._play_dialog_steps
 
         self._set_status(f"  Step {step} dialog {ds}: checking for textbox…")
-        # Capture the screen once and run both template checks in a single pass.
-        has_textbox, is_clear = self._play_check_templates_now([
+        # Capture the screen once and run all template checks in a single pass.
+        has_textbox, is_clear, is_failed = self._play_check_templates_now([
             (self._get_textbox_region()[0], _TEXTBOX_TEMPLATE_PATH, _TEXTBOX_MATCH_THRESHOLD),
             (self._get_game_clear_region()[0], _TEXTBOX_GAME_CLEAR_TEMPLATE_PATH, _TEXTBOX_GAME_CLEAR_MATCH_THRESHOLD),
+            (self._get_game_failed_region()[0], _TEXTBOX_GAME_FAILED_TEMPLATE_PATH, _TEXTBOX_GAME_FAILED_MATCH_THRESHOLD),
         ])
 
         if not has_textbox:
@@ -1837,7 +1962,7 @@ class OverlayControlWindow(QMainWindow):
                 QTimer.singleShot(1000, self._play_step)
             return
 
-        self._set_status(f"  Step {step} dialog {ds}: textbox present — checking for Game Clear…")
+        self._set_status(f"  Step {step} dialog {ds}: textbox present — checking for Game Clear / Game Failed…")
         # Hide overlays while a textbox is on screen so the click lands cleanly.
         if ds == 1:
             self.x11_overlay.hide()
@@ -1847,6 +1972,11 @@ class OverlayControlWindow(QMainWindow):
             self._play_dialog_steps = 0
             QTimer.singleShot(self._play_dialog_delay_ms, self._play_wait_for_play_level)
             return
+        if is_failed:
+            self._set_status("  Game Failed (voltorb!) detected — advancing to Play Level prompt…", "warning")
+            self._play_dialog_steps = 0
+            QTimer.singleShot(self._play_dialog_delay_ms, self._play_wait_for_play_level_after_fail)
+            return
 
         if ds >= MAX_DIALOG_STEPS:
             self._play_stop(f"Dialog loop exceeded {MAX_DIALOG_STEPS} steps — stopping.", "error")
@@ -1855,6 +1985,58 @@ class OverlayControlWindow(QMainWindow):
         self._set_status(f"  Step {step} dialog {ds}: not game clear — advancing dialog…")
         self._play_click_textbox_center()
         QTimer.singleShot(self._play_dialog_delay_ms, self._play_check_dialog_step)
+
+    def _play_wait_for_play_level_after_fail(self) -> None:
+        """After game failed: keep clicking game-failed region centre until Play Level prompt appears."""
+        if not self._play_level_running:
+            return
+
+        MAX_WAIT_STEPS = 30
+        self._play_dialog_steps += 1
+        ds = self._play_dialog_steps
+
+        has_play_level = self._play_check_template_now(
+            self._get_play_level_region()[0],
+            _TEXTBOX_PLAY_LEVEL_TEMPLATE_PATH,
+            _TEXTBOX_PLAY_LEVEL_MATCH_THRESHOLD,
+        )
+
+        if has_play_level:
+            self._set_status("  Play Level prompt detected after game failed — stopping.", "warning")
+            self._play_level_running = False
+            self.start_play_btn.setText("Start + Play")
+            return
+
+        if ds >= MAX_WAIT_STEPS:
+            self._play_stop(f"Timed out waiting for Play Level prompt after fail ({MAX_WAIT_STEPS} steps).", "error")
+            return
+
+        self._set_status(f"  Waiting for Play Level after fail (step {ds}) — clicking game-failed region…")
+        gf_region, _ = self._get_game_failed_region()
+        l_f, t_f, r_f, b_f = gf_region
+        mapping_rect = self._mapping_rect_for_signature(self._last_capture_signature)
+        if mapping_rect is not None:
+            gx, gy, gw, gh = (
+                mapping_rect.x(), mapping_rect.y(),
+                mapping_rect.width(), mapping_rect.height(),
+            )
+        else:
+            screen = self._get_selected_screen()
+            if screen is None:
+                self._play_stop("No monitor selected.", "error")
+                return
+            geo = screen.geometry()
+            if self._last_image_size:
+                mr = _map_image_to_overlay(geo.width(), geo.height(), *self._last_image_size)
+                mr.translate(geo.x(), geo.y())
+                gx, gy, gw, gh = mr.x(), mr.y(), mr.width(), mr.height()
+            else:
+                gx, gy, gw, gh = geo.x(), geo.y(), geo.width(), geo.height()
+
+        cx = gx + int(gw * (l_f + r_f) / 2)
+        cy = gy + int(gh * (t_f + b_f) / 2)
+        self._play_do_xdotool_click(cx, cy, self.state.target_window_id)
+        QTimer.singleShot(self._play_poll_delay_ms, self._play_wait_for_play_level_after_fail)
 
     def _play_wait_for_play_level(self) -> None:
         """After game clear: keep clicking game-clear region centre until Play Level prompt appears."""
