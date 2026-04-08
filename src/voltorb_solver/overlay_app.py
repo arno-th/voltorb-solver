@@ -65,32 +65,33 @@ _TEXTBOX_REGION = (0.07, 0.974, 0.10, 0.993)
 _TEXTBOX_TEMPLATE_PATH = Path("assets/templates/textbox_indicator.png")
 _TEXTBOX_MATCH_THRESHOLD = 0.90
 
-# Textbox indicator position as multiples of tile size, relative to board edges.
-# The indicator sits just below the board's bottom row, offset from the board's left edge.
-_TEXTBOX_BOARD_LEFT_TILES = 0.40
-_TEXTBOX_BOARD_RIGHT_TILES = 0.65
-_TEXTBOX_BOARD_TOP_TILES = 0.12
-_TEXTBOX_BOARD_BOTTOM_TILES = 0.36
+# Textbox indicator position as (x, y, w, h) fractions of the board dimensions.
+# Origin (0, 0) = top-left of the board; (1, 1) = bottom-right of the board.
+# Values outside [0, 1] are valid (e.g. y > 1 = below the board).
+_TEXTBOX_BOARD_X = 0.08
+_TEXTBOX_BOARD_Y = 1.024
+_TEXTBOX_BOARD_W = 0.05
+_TEXTBOX_BOARD_H = 0.048
 
 _TEXTBOX_GAME_CLEAR_REGION = (0.07, 0.9, 0.2, 0.935)
 _TEXTBOX_GAME_CLEAR_TEMPLATE_PATH = Path("assets/templates/textbox_game_clear.png")
 _TEXTBOX_GAME_CLEAR_MATCH_THRESHOLD = 0.90
 
-# Game-clear textbox board-relative defaults (tile units from board edge).
-_TEXTBOX_GAME_CLEAR_BOARD_LEFT_TILES = 0.07
-_TEXTBOX_GAME_CLEAR_BOARD_RIGHT_TILES = 2.0
-_TEXTBOX_GAME_CLEAR_BOARD_TOP_TILES = -1.0
-_TEXTBOX_GAME_CLEAR_BOARD_BOTTOM_TILES = -0.35
+# Game-clear textbox board-relative defaults (x, y, w, h fractions of board).
+_TEXTBOX_GAME_CLEAR_BOARD_X = 0.014
+_TEXTBOX_GAME_CLEAR_BOARD_Y = 0.8
+_TEXTBOX_GAME_CLEAR_BOARD_W = 0.386
+_TEXTBOX_GAME_CLEAR_BOARD_H = 0.13
 
 _TEXTBOX_PLAY_LEVEL_REGION = (0.07, 0.9, 0.2, 0.935)
 _TEXTBOX_PLAY_LEVEL_TEMPLATE_PATH = Path("assets/templates/textbox_play_level.png")
 _TEXTBOX_PLAY_LEVEL_MATCH_THRESHOLD = 0.90
 
-# Play-level textbox board-relative defaults (tile units from board edge).
-_TEXTBOX_PLAY_LEVEL_BOARD_LEFT_TILES = 0.07
-_TEXTBOX_PLAY_LEVEL_BOARD_RIGHT_TILES = 2.0
-_TEXTBOX_PLAY_LEVEL_BOARD_TOP_TILES = -1.0
-_TEXTBOX_PLAY_LEVEL_BOARD_BOTTOM_TILES = -0.35
+# Play-level textbox board-relative defaults (x, y, w, h fractions of board).
+_TEXTBOX_PLAY_LEVEL_BOARD_X = 0.014
+_TEXTBOX_PLAY_LEVEL_BOARD_Y = 0.8
+_TEXTBOX_PLAY_LEVEL_BOARD_W = 0.386
+_TEXTBOX_PLAY_LEVEL_BOARD_H = 0.13
 
 
 def _bind_widget_to_screen(widget: QWidget, screen) -> None:
@@ -439,18 +440,18 @@ class OverlayControlWindow(QMainWindow):
         self._anchor_image_size: tuple[int, int] | None = None
 
         self._textbox_offsets_path = Path("assets/templates/textbox_offsets.json")
-        self._textbox_left_tiles = _TEXTBOX_BOARD_LEFT_TILES
-        self._textbox_right_tiles = _TEXTBOX_BOARD_RIGHT_TILES
-        self._textbox_top_tiles = _TEXTBOX_BOARD_TOP_TILES
-        self._textbox_bottom_tiles = _TEXTBOX_BOARD_BOTTOM_TILES
-        self._game_clear_left_tiles = _TEXTBOX_GAME_CLEAR_BOARD_LEFT_TILES
-        self._game_clear_right_tiles = _TEXTBOX_GAME_CLEAR_BOARD_RIGHT_TILES
-        self._game_clear_top_tiles = _TEXTBOX_GAME_CLEAR_BOARD_TOP_TILES
-        self._game_clear_bottom_tiles = _TEXTBOX_GAME_CLEAR_BOARD_BOTTOM_TILES
-        self._play_level_left_tiles = _TEXTBOX_PLAY_LEVEL_BOARD_LEFT_TILES
-        self._play_level_right_tiles = _TEXTBOX_PLAY_LEVEL_BOARD_RIGHT_TILES
-        self._play_level_top_tiles = _TEXTBOX_PLAY_LEVEL_BOARD_TOP_TILES
-        self._play_level_bottom_tiles = _TEXTBOX_PLAY_LEVEL_BOARD_BOTTOM_TILES
+        self._textbox_x = _TEXTBOX_BOARD_X
+        self._textbox_y = _TEXTBOX_BOARD_Y
+        self._textbox_w = _TEXTBOX_BOARD_W
+        self._textbox_h = _TEXTBOX_BOARD_H
+        self._game_clear_x = _TEXTBOX_GAME_CLEAR_BOARD_X
+        self._game_clear_y = _TEXTBOX_GAME_CLEAR_BOARD_Y
+        self._game_clear_w = _TEXTBOX_GAME_CLEAR_BOARD_W
+        self._game_clear_h = _TEXTBOX_GAME_CLEAR_BOARD_H
+        self._play_level_x = _TEXTBOX_PLAY_LEVEL_BOARD_X
+        self._play_level_y = _TEXTBOX_PLAY_LEVEL_BOARD_Y
+        self._play_level_w = _TEXTBOX_PLAY_LEVEL_BOARD_W
+        self._play_level_h = _TEXTBOX_PLAY_LEVEL_BOARD_H
         self._load_textbox_offsets()
 
         root = QWidget()
@@ -680,29 +681,29 @@ class OverlayControlWindow(QMainWindow):
         offsets_row = QHBoxLayout()
         offsets_row.setSpacing(6)
         for attr, label_text in (
-            ("textbox_left_spin", "L:"),
-            ("textbox_right_spin", "R:"),
-            ("textbox_top_spin", "T:"),
-            ("textbox_bottom_spin", "B:"),
+            ("textbox_x_spin", "X:"),
+            ("textbox_y_spin", "Y:"),
+            ("textbox_w_spin", "W:"),
+            ("textbox_h_spin", "H:"),
         ):
             lbl = QLabel(label_text)
             lbl.setObjectName("FieldLabel")
             offsets_row.addWidget(lbl)
             spin = QDoubleSpinBox()
-            spin.setRange(-5.0, 30.0)
-            spin.setSingleStep(0.05)
-            spin.setDecimals(2)
-            spin.setFixedWidth(68)
-            spin.setToolTip("Tile-widths/heights from the board edge (board-relative offset)")
+            spin.setRange(-3.0, 5.0)
+            spin.setSingleStep(0.01)
+            spin.setDecimals(3)
+            spin.setFixedWidth(72)
+            spin.setToolTip("Board-relative fraction: origin (0,0) = board top-left, (1,1) = board bottom-right")
             setattr(self, attr, spin)
             offsets_row.addWidget(spin)
         offsets_row.addStretch(1)
-        self.textbox_left_spin.setValue(self._textbox_left_tiles)
-        self.textbox_right_spin.setValue(self._textbox_right_tiles)
-        self.textbox_top_spin.setValue(self._textbox_top_tiles)
-        self.textbox_bottom_spin.setValue(self._textbox_bottom_tiles)
-        for spin in (self.textbox_left_spin, self.textbox_right_spin,
-                     self.textbox_top_spin, self.textbox_bottom_spin):
+        self.textbox_x_spin.setValue(self._textbox_x)
+        self.textbox_y_spin.setValue(self._textbox_y)
+        self.textbox_w_spin.setValue(self._textbox_w)
+        self.textbox_h_spin.setValue(self._textbox_h)
+        for spin in (self.textbox_x_spin, self.textbox_y_spin,
+                     self.textbox_w_spin, self.textbox_h_spin):
             spin.valueChanged.connect(self._on_textbox_offsets_changed)
         debug_content_layout.addLayout(offsets_row)
 
@@ -731,29 +732,29 @@ class OverlayControlWindow(QMainWindow):
         gc_offsets_row = QHBoxLayout()
         gc_offsets_row.setSpacing(6)
         for attr, label_text in (
-            ("game_clear_left_spin", "L:"),
-            ("game_clear_right_spin", "R:"),
-            ("game_clear_top_spin", "T:"),
-            ("game_clear_bottom_spin", "B:"),
+            ("game_clear_x_spin", "X:"),
+            ("game_clear_y_spin", "Y:"),
+            ("game_clear_w_spin", "W:"),
+            ("game_clear_h_spin", "H:"),
         ):
             lbl = QLabel(label_text)
             lbl.setObjectName("FieldLabel")
             gc_offsets_row.addWidget(lbl)
             spin = QDoubleSpinBox()
-            spin.setRange(-5.0, 30.0)
-            spin.setSingleStep(0.05)
-            spin.setDecimals(2)
-            spin.setFixedWidth(68)
-            spin.setToolTip("Tile-widths/heights from the board edge (board-relative offset)")
+            spin.setRange(-3.0, 5.0)
+            spin.setSingleStep(0.01)
+            spin.setDecimals(3)
+            spin.setFixedWidth(72)
+            spin.setToolTip("Board-relative fraction: origin (0,0) = board top-left, (1,1) = board bottom-right")
             setattr(self, attr, spin)
             gc_offsets_row.addWidget(spin)
         gc_offsets_row.addStretch(1)
-        self.game_clear_left_spin.setValue(self._game_clear_left_tiles)
-        self.game_clear_right_spin.setValue(self._game_clear_right_tiles)
-        self.game_clear_top_spin.setValue(self._game_clear_top_tiles)
-        self.game_clear_bottom_spin.setValue(self._game_clear_bottom_tiles)
-        for spin in (self.game_clear_left_spin, self.game_clear_right_spin,
-                     self.game_clear_top_spin, self.game_clear_bottom_spin):
+        self.game_clear_x_spin.setValue(self._game_clear_x)
+        self.game_clear_y_spin.setValue(self._game_clear_y)
+        self.game_clear_w_spin.setValue(self._game_clear_w)
+        self.game_clear_h_spin.setValue(self._game_clear_h)
+        for spin in (self.game_clear_x_spin, self.game_clear_y_spin,
+                     self.game_clear_w_spin, self.game_clear_h_spin):
             spin.valueChanged.connect(self._on_game_clear_offsets_changed)
         debug_content_layout.addLayout(gc_offsets_row)
 
@@ -781,29 +782,29 @@ class OverlayControlWindow(QMainWindow):
         pl_offsets_row = QHBoxLayout()
         pl_offsets_row.setSpacing(6)
         for attr, label_text in (
-            ("play_level_left_spin", "L:"),
-            ("play_level_right_spin", "R:"),
-            ("play_level_top_spin", "T:"),
-            ("play_level_bottom_spin", "B:"),
+            ("play_level_x_spin", "X:"),
+            ("play_level_y_spin", "Y:"),
+            ("play_level_w_spin", "W:"),
+            ("play_level_h_spin", "H:"),
         ):
             lbl = QLabel(label_text)
             lbl.setObjectName("FieldLabel")
             pl_offsets_row.addWidget(lbl)
             spin = QDoubleSpinBox()
-            spin.setRange(-5.0, 30.0)
-            spin.setSingleStep(0.05)
-            spin.setDecimals(2)
-            spin.setFixedWidth(68)
-            spin.setToolTip("Tile-widths/heights from the board edge (board-relative offset)")
+            spin.setRange(-3.0, 5.0)
+            spin.setSingleStep(0.01)
+            spin.setDecimals(3)
+            spin.setFixedWidth(72)
+            spin.setToolTip("Board-relative fraction: origin (0,0) = board top-left, (1,1) = board bottom-right")
             setattr(self, attr, spin)
             pl_offsets_row.addWidget(spin)
         pl_offsets_row.addStretch(1)
-        self.play_level_left_spin.setValue(self._play_level_left_tiles)
-        self.play_level_right_spin.setValue(self._play_level_right_tiles)
-        self.play_level_top_spin.setValue(self._play_level_top_tiles)
-        self.play_level_bottom_spin.setValue(self._play_level_bottom_tiles)
-        for spin in (self.play_level_left_spin, self.play_level_right_spin,
-                     self.play_level_top_spin, self.play_level_bottom_spin):
+        self.play_level_x_spin.setValue(self._play_level_x)
+        self.play_level_y_spin.setValue(self._play_level_y)
+        self.play_level_w_spin.setValue(self._play_level_w)
+        self.play_level_h_spin.setValue(self._play_level_h)
+        for spin in (self.play_level_x_spin, self.play_level_y_spin,
+                     self.play_level_w_spin, self.play_level_h_spin):
             spin.valueChanged.connect(self._on_play_level_offsets_changed)
         debug_content_layout.addLayout(pl_offsets_row)
 
@@ -1301,18 +1302,18 @@ class OverlayControlWindow(QMainWindow):
             return
         try:
             data = json.loads(self._textbox_offsets_path.read_text())
-            self._textbox_left_tiles = float(data.get("left", self._textbox_left_tiles))
-            self._textbox_right_tiles = float(data.get("right", self._textbox_right_tiles))
-            self._textbox_top_tiles = float(data.get("top", self._textbox_top_tiles))
-            self._textbox_bottom_tiles = float(data.get("bottom", self._textbox_bottom_tiles))
-            self._game_clear_left_tiles = float(data.get("gc_left", self._game_clear_left_tiles))
-            self._game_clear_right_tiles = float(data.get("gc_right", self._game_clear_right_tiles))
-            self._game_clear_top_tiles = float(data.get("gc_top", self._game_clear_top_tiles))
-            self._game_clear_bottom_tiles = float(data.get("gc_bottom", self._game_clear_bottom_tiles))
-            self._play_level_left_tiles = float(data.get("pl_left", self._play_level_left_tiles))
-            self._play_level_right_tiles = float(data.get("pl_right", self._play_level_right_tiles))
-            self._play_level_top_tiles = float(data.get("pl_top", self._play_level_top_tiles))
-            self._play_level_bottom_tiles = float(data.get("pl_bottom", self._play_level_bottom_tiles))
+            self._textbox_x = float(data.get("x", self._textbox_x))
+            self._textbox_y = float(data.get("y", self._textbox_y))
+            self._textbox_w = float(data.get("w", self._textbox_w))
+            self._textbox_h = float(data.get("h", self._textbox_h))
+            self._game_clear_x = float(data.get("gc_x", self._game_clear_x))
+            self._game_clear_y = float(data.get("gc_y", self._game_clear_y))
+            self._game_clear_w = float(data.get("gc_w", self._game_clear_w))
+            self._game_clear_h = float(data.get("gc_h", self._game_clear_h))
+            self._play_level_x = float(data.get("pl_x", self._play_level_x))
+            self._play_level_y = float(data.get("pl_y", self._play_level_y))
+            self._play_level_w = float(data.get("pl_w", self._play_level_w))
+            self._play_level_h = float(data.get("pl_h", self._play_level_h))
         except Exception:
             pass
 
@@ -1321,40 +1322,40 @@ class OverlayControlWindow(QMainWindow):
         import json
         self._textbox_offsets_path.parent.mkdir(parents=True, exist_ok=True)
         data = {
-            "left": self._textbox_left_tiles,
-            "right": self._textbox_right_tiles,
-            "top": self._textbox_top_tiles,
-            "bottom": self._textbox_bottom_tiles,
-            "gc_left": self._game_clear_left_tiles,
-            "gc_right": self._game_clear_right_tiles,
-            "gc_top": self._game_clear_top_tiles,
-            "gc_bottom": self._game_clear_bottom_tiles,
-            "pl_left": self._play_level_left_tiles,
-            "pl_right": self._play_level_right_tiles,
-            "pl_top": self._play_level_top_tiles,
-            "pl_bottom": self._play_level_bottom_tiles,
+            "x": self._textbox_x,
+            "y": self._textbox_y,
+            "w": self._textbox_w,
+            "h": self._textbox_h,
+            "gc_x": self._game_clear_x,
+            "gc_y": self._game_clear_y,
+            "gc_w": self._game_clear_w,
+            "gc_h": self._game_clear_h,
+            "pl_x": self._play_level_x,
+            "pl_y": self._play_level_y,
+            "pl_w": self._play_level_w,
+            "pl_h": self._play_level_h,
         }
         self._textbox_offsets_path.write_text(json.dumps(data, indent=2))
 
     def _on_textbox_offsets_changed(self) -> None:
-        self._textbox_left_tiles = self.textbox_left_spin.value()
-        self._textbox_right_tiles = self.textbox_right_spin.value()
-        self._textbox_top_tiles = self.textbox_top_spin.value()
-        self._textbox_bottom_tiles = self.textbox_bottom_spin.value()
+        self._textbox_x = self.textbox_x_spin.value()
+        self._textbox_y = self.textbox_y_spin.value()
+        self._textbox_w = self.textbox_w_spin.value()
+        self._textbox_h = self.textbox_h_spin.value()
         self._save_textbox_offsets()
 
     def _on_game_clear_offsets_changed(self) -> None:
-        self._game_clear_left_tiles = self.game_clear_left_spin.value()
-        self._game_clear_right_tiles = self.game_clear_right_spin.value()
-        self._game_clear_top_tiles = self.game_clear_top_spin.value()
-        self._game_clear_bottom_tiles = self.game_clear_bottom_spin.value()
+        self._game_clear_x = self.game_clear_x_spin.value()
+        self._game_clear_y = self.game_clear_y_spin.value()
+        self._game_clear_w = self.game_clear_w_spin.value()
+        self._game_clear_h = self.game_clear_h_spin.value()
         self._save_textbox_offsets()
 
     def _on_play_level_offsets_changed(self) -> None:
-        self._play_level_left_tiles = self.play_level_left_spin.value()
-        self._play_level_right_tiles = self.play_level_right_spin.value()
-        self._play_level_top_tiles = self.play_level_top_spin.value()
-        self._play_level_bottom_tiles = self.play_level_bottom_spin.value()
+        self._play_level_x = self.play_level_x_spin.value()
+        self._play_level_y = self.play_level_y_spin.value()
+        self._play_level_w = self.play_level_w_spin.value()
+        self._play_level_h = self.play_level_h_spin.value()
         self._save_textbox_offsets()
 
     def _get_textbox_region(self) -> tuple[tuple[float, float, float, float], bool]:
@@ -1364,16 +1365,16 @@ class OverlayControlWindow(QMainWindow):
             img_w, img_h = self._last_image_size
             if img_w > 0 and img_h > 0:
                 board_left = min(r.x for r in tile_regions)
+                board_top = min(r.y for r in tile_regions)
+                board_right = max(r.x + r.w for r in tile_regions)
                 board_bottom = max(r.y + r.h for r in tile_regions)
-                tile_ws = sorted(r.w for r in tile_regions)
-                tile_hs = sorted(r.h for r in tile_regions)
-                tile_w = tile_ws[len(tile_ws) // 2]
-                tile_h = tile_hs[len(tile_hs) // 2]
+                board_w = board_right - board_left
+                board_h = board_bottom - board_top
 
-                x0 = board_left + int(self._textbox_left_tiles * tile_w)
-                x1 = board_left + int(self._textbox_right_tiles * tile_w)
-                y0 = board_bottom + int(self._textbox_top_tiles * tile_h)
-                y1 = board_bottom + int(self._textbox_bottom_tiles * tile_h)
+                x0 = board_left + int(self._textbox_x * board_w)
+                y0 = board_top + int(self._textbox_y * board_h)
+                x1 = x0 + int(self._textbox_w * board_w)
+                y1 = y0 + int(self._textbox_h * board_h)
 
                 x0 = max(0, min(x0, img_w - 1))
                 x1 = max(x0 + 1, min(x1, img_w))
@@ -1383,8 +1384,7 @@ class OverlayControlWindow(QMainWindow):
                 return (x0 / img_w, y0 / img_h, x1 / img_w, y1 / img_h), False
 
         anchor = self._board_region_from_anchor(
-            self._textbox_left_tiles, self._textbox_right_tiles,
-            self._textbox_top_tiles, self._textbox_bottom_tiles,
+            self._textbox_x, self._textbox_y, self._textbox_w, self._textbox_h,
         )
         if anchor is not None:
             return anchor
@@ -1397,16 +1397,16 @@ class OverlayControlWindow(QMainWindow):
             img_w, img_h = self._last_image_size
             if img_w > 0 and img_h > 0:
                 board_left = min(r.x for r in tile_regions)
+                board_top = min(r.y for r in tile_regions)
+                board_right = max(r.x + r.w for r in tile_regions)
                 board_bottom = max(r.y + r.h for r in tile_regions)
-                tile_ws = sorted(r.w for r in tile_regions)
-                tile_hs = sorted(r.h for r in tile_regions)
-                tile_w = tile_ws[len(tile_ws) // 2]
-                tile_h = tile_hs[len(tile_hs) // 2]
+                board_w = board_right - board_left
+                board_h = board_bottom - board_top
 
-                x0 = board_left + int(self._game_clear_left_tiles * tile_w)
-                x1 = board_left + int(self._game_clear_right_tiles * tile_w)
-                y0 = board_bottom + int(self._game_clear_top_tiles * tile_h)
-                y1 = board_bottom + int(self._game_clear_bottom_tiles * tile_h)
+                x0 = board_left + int(self._game_clear_x * board_w)
+                y0 = board_top + int(self._game_clear_y * board_h)
+                x1 = x0 + int(self._game_clear_w * board_w)
+                y1 = y0 + int(self._game_clear_h * board_h)
 
                 x0 = max(0, min(x0, img_w - 1))
                 x1 = max(x0 + 1, min(x1, img_w))
@@ -1416,8 +1416,7 @@ class OverlayControlWindow(QMainWindow):
                 return (x0 / img_w, y0 / img_h, x1 / img_w, y1 / img_h), False
 
         anchor = self._board_region_from_anchor(
-            self._game_clear_left_tiles, self._game_clear_right_tiles,
-            self._game_clear_top_tiles, self._game_clear_bottom_tiles,
+            self._game_clear_x, self._game_clear_y, self._game_clear_w, self._game_clear_h,
         )
         if anchor is not None:
             return anchor
@@ -1430,16 +1429,16 @@ class OverlayControlWindow(QMainWindow):
             img_w, img_h = self._last_image_size
             if img_w > 0 and img_h > 0:
                 board_left = min(r.x for r in tile_regions)
+                board_top = min(r.y for r in tile_regions)
+                board_right = max(r.x + r.w for r in tile_regions)
                 board_bottom = max(r.y + r.h for r in tile_regions)
-                tile_ws = sorted(r.w for r in tile_regions)
-                tile_hs = sorted(r.h for r in tile_regions)
-                tile_w = tile_ws[len(tile_ws) // 2]
-                tile_h = tile_hs[len(tile_hs) // 2]
+                board_w = board_right - board_left
+                board_h = board_bottom - board_top
 
-                x0 = board_left + int(self._play_level_left_tiles * tile_w)
-                x1 = board_left + int(self._play_level_right_tiles * tile_w)
-                y0 = board_bottom + int(self._play_level_top_tiles * tile_h)
-                y1 = board_bottom + int(self._play_level_bottom_tiles * tile_h)
+                x0 = board_left + int(self._play_level_x * board_w)
+                y0 = board_top + int(self._play_level_y * board_h)
+                x1 = x0 + int(self._play_level_w * board_w)
+                y1 = y0 + int(self._play_level_h * board_h)
 
                 x0 = max(0, min(x0, img_w - 1))
                 x1 = max(x0 + 1, min(x1, img_w))
@@ -1449,8 +1448,7 @@ class OverlayControlWindow(QMainWindow):
                 return (x0 / img_w, y0 / img_h, x1 / img_w, y1 / img_h), False
 
         anchor = self._board_region_from_anchor(
-            self._play_level_left_tiles, self._play_level_right_tiles,
-            self._play_level_top_tiles, self._play_level_bottom_tiles,
+            self._play_level_x, self._play_level_y, self._play_level_w, self._play_level_h,
         )
         if anchor is not None:
             return anchor
@@ -2293,16 +2291,16 @@ class OverlayControlWindow(QMainWindow):
 
     def _board_region_from_anchor(
         self,
-        left_tiles: float,
-        right_tiles: float,
-        top_tiles: float,
-        bottom_tiles: float,
+        bx: float,
+        by: float,
+        bw: float,
+        bh: float,
     ) -> tuple[tuple[float, float, float, float], bool] | None:
         """Compute a textbox region from the cached anchor board rect.
 
-        Returns ``(frac_region, False)`` or ``None`` when the anchor rect is
-        not available.  ``top_tiles`` / ``bottom_tiles`` are signed offsets
-        from the board's bottom edge (negative = above the board).
+        ``bx``, ``by``, ``bw``, ``bh`` are board-relative fractions where
+        (0, 0) = board top-left and (1, 1) = board bottom-right.
+        Returns ``(frac_region, False)`` or ``None`` when the anchor rect is unavailable.
         """
         if self._anchor_board_rect is None or self._anchor_image_size is None:
             return None
@@ -2312,12 +2310,10 @@ class OverlayControlWindow(QMainWindow):
         board_h = bottom - top
         if board_w <= 0 or board_h <= 0:
             return None
-        tile_w = board_w / 5.0
-        tile_h = board_h / 5.0
-        x0 = left + int(left_tiles * tile_w)
-        x1 = left + int(right_tiles * tile_w)
-        y0 = bottom + int(top_tiles * tile_h)
-        y1 = bottom + int(bottom_tiles * tile_h)
+        x0 = left + int(bx * board_w)
+        y0 = top + int(by * board_h)
+        x1 = x0 + int(bw * board_w)
+        y1 = y0 + int(bh * board_h)
         x0 = max(0, min(x0, img_w - 1))
         x1 = max(x0 + 1, min(x1, img_w))
         y0 = max(0, min(y0, img_h - 1))
