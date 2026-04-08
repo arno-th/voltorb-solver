@@ -1810,6 +1810,16 @@ class OverlayControlWindow(QMainWindow):
         if not _TEXTBOX_GAME_CLEAR_TEMPLATE_PATH.exists():
             self._set_status("Warning: game-clear template not found — completion detection disabled.", "warning")
 
+        # Resume from current state if a board is already parsed (i.e. was paused mid-level).
+        tile_regions = [r for r in self._last_parse_regions if self._is_tile_region(r.name)]
+        if self.state.last_input_path is not None and tile_regions:
+            self._play_level_running = True
+            self._play_dialog_steps = 0
+            self.start_play_btn.setText("Stop Play")
+            self._set_status("Resuming play from current board state…", "info")
+            QTimer.singleShot(0, self._play_step)
+            return
+
         # Capture one screenshot up-front to: detect board corners via anchors and
         # check whether the Play Level dialog is already showing before the board appears.
         tmp_path = str(
