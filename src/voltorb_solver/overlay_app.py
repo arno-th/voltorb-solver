@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+import json
 from pathlib import Path
 import re
 import shutil
@@ -132,6 +133,7 @@ class OverlayState:
     selected_screen_index: int = 0
     target_window_id: int | None = None
     target_window_name: str | None = None
+    target_window_class: str | None = None
 
 
 OVERLAY_COLORS = [
@@ -1094,6 +1096,7 @@ class OverlayControlWindow(QMainWindow):
         self._set_status("No screenshot parsed yet.", level="info")
         self._refresh_monitor_list()
         self._install_hotkey()
+        self._restore_window_from_prefs()
 
     def _install_hotkey(self) -> None:
         """Install the play/pause hotkey globally (pynput) with QShortcut as fallback."""
@@ -2697,8 +2700,10 @@ class OverlayControlWindow(QMainWindow):
 
         self.state.target_window_id = int(match.group(1))
         self.state.target_window_name = match.group(2).strip() or "Unnamed window"
+        self.state.target_window_class = self._query_window_class(self.state.target_window_id)
 
         self._align_monitor_to_target_window()
+        self._save_prefs()
         self._update_window_hint()
         self._update_target_window_button()
         self._set_status(
@@ -2709,9 +2714,95 @@ class OverlayControlWindow(QMainWindow):
     def clear_target_window(self) -> None:
         self.state.target_window_id = None
         self.state.target_window_name = None
+        self.state.target_window_class = None
+        self._save_prefs()
         self._update_window_hint()
         self._update_target_window_button()
         self._set_status("Cleared target window. Capture will use selected monitor.", level="info")
+
+    # ── Persistent preferences ────────────────────────────────────────────────────
+
+    _PREFS_PATH = Path.home() / ".local" / "share" / "voltorb-solver" / "prefs.json"
+
+    def _save_prefs(self) -> None:
+        """Persist user preferences (currently: last target window name)."""
+        try:
+            self._PREFS_PATH.parent.mkdir(parents=True, exist_ok=True)
+            data: dict = {}
+            if self._PREFS_PATH.exists():
+                try:
+                    data = json.loads(self._PREFS_PATH.read_text())
+                except Exception:
+                    data = {}
+            data["target_window_name"] = self.state.target_window_name
+            data["target_window_class"] = self.state.target_window_class
+            screen = self._get_selected_screen()
+            data["monitor_name"] = screen.name() if screen is not None else None
+            self._PREFS_PATH.write_text(json.dumps(data, indent=2))
+            if self.state.target_window_name is not None:
+                self._set_status(
+                    f"Window preference saved: \"{self.state.target_window_name}\"",
+                    level="info",
+                )
+        except Exception:
+            pass
+
+    def _restore_window_from_prefs(self) -> None:
+        """On startup, restore saved monitor and window preferences."""
+        try:
+            data = json.loads(self._PREFS_PATH.read_text())
+        except Exception:
+            return
+
+        # Restore monitor by name (e.g. "HDMI-1").
+        # Block signals so setCurrentIndex doesn't trigger _on_monitor_changed → _save_prefs,
+        # which would overwrite target_window_name with null before we restore it below.
+        saved_monitor: str | None = data.get("monitor_name")
+        if saved_monitor:
+            for idx, screen in enumerate(self._screens):
+                if screen.name() == saved_monitor:
+                    if idx != self.state.selected_screen_index:
+                        self.monitor_combo.blockSignals(True)
+                        self.monitor_combo.setCurrentIndex(idx)
+                        self.monitor_combo.blockSignals(False)
+                        self.state.selected_screen_index = idx
+                        self.x11_overlay.set_target_screen(screen)
+                        self.simple_overlay.set_target_screen(screen)
+                        self._update_monitor_hint()
+                    break
+
+        # Restore target window. Prefer WM_CLASS (stable) over title (may change).
+        saved_name: str | None = data.get("target_window_name")
+        saved_class: str | None = data.get("target_window_class")
+        if not (saved_name or saved_class) or shutil.which("xdotool") is None:
+            return
+        ids: list[str] = []
+        if saved_class:
+            try:
+                result = subprocess.run(
+                    ["xdotool", "search", "--class", saved_class],
+                    capture_output=True, text=True, check=False,
+                )
+                ids = [l.strip() for l in result.stdout.splitlines() if l.strip().isdigit()]
+            except Exception:
+                pass
+        if not ids and saved_name:
+            try:
+                result = subprocess.run(
+                    ["xdotool", "search", "--name", re.escape(saved_name)],
+                    capture_output=True, text=True, check=False,
+                )
+                ids = [l.strip() for l in result.stdout.splitlines() if l.strip().isdigit()]
+            except Exception:
+                pass
+        if not ids:
+            return
+        self.state.target_window_id = int(ids[0])
+        self.state.target_window_name = saved_name
+        self.state.target_window_class = saved_class
+        self._align_monitor_to_target_window()
+        self._update_window_hint()
+        self._update_target_window_button()
 
     def _capture_window(self, window_id: int):
         # Try the selected screen first — it's almost always the right one and
@@ -3045,6 +3136,7 @@ class OverlayControlWindow(QMainWindow):
             self.x11_overlay.set_target_screen(screen)
             self.simple_overlay.set_target_screen(screen)
         self._update_monitor_hint()
+        self._save_prefs()
 
         if self.overlay_btn.isChecked():
             self._show_active_overlay()
@@ -3054,6 +3146,21 @@ class OverlayControlWindow(QMainWindow):
             return None
         index = min(max(self.state.selected_screen_index, 0), len(self._screens) - 1)
         return self._screens[index]
+
+    def _query_window_class(self, window_id: int) -> str | None:
+        """Return the WM_CLASS instance name for a window, or None if unavailable."""
+        if shutil.which("xprop") is None:
+            return None
+        try:
+            result = subprocess.run(
+                ["xprop", "-id", str(window_id), "WM_CLASS"],
+                capture_output=True, text=True, check=False,
+            )
+        except Exception:
+            return None
+        # Output: WM_CLASS(STRING) = "melonDS", "melonDS"
+        m = re.search(r'WM_CLASS\(STRING\)\s*=\s*"([^"]+)"', result.stdout)
+        return m.group(1) if m else None
 
     def _query_window_geometry(self, window_id: int) -> tuple[int, int, int, int] | None:
         if shutil.which("xwininfo") is None:
