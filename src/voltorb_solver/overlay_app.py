@@ -2204,6 +2204,7 @@ class OverlayControlWindow(QMainWindow):
                 self._set_status("  Play Level prompt detected after game failed — stopping.", "warning")
                 self._play_level_running = False
                 self.start_play_btn.setText("Start + Play")
+                self.clear_overlay()
             return
 
         if ds >= MAX_WAIT_STEPS:
@@ -2262,6 +2263,7 @@ class OverlayControlWindow(QMainWindow):
                 self._set_status("  Play Level prompt detected — game clear complete.", "success")
                 self._play_level_running = False
                 self.start_play_btn.setText("Start + Play")
+                self.clear_overlay()
             return
 
         if ds >= MAX_WAIT_STEPS:
