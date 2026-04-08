@@ -11,7 +11,7 @@ import time
 from tempfile import gettempdir
 
 from PySide6.QtCore import Qt, QRect, QTimer, Signal
-from PySide6.QtGui import QColor, QGuiApplication, QPixmap
+from PySide6.QtGui import QColor, QGuiApplication, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QSpinBox,
     QHBoxLayout,
+    QKeySequenceEdit,
     QLabel,
     QMainWindow,
     QMessageBox,
@@ -39,6 +40,75 @@ try:
     import cv2 as _cv2  # type: ignore
 except Exception:
     _cv2 = None
+
+try:
+    from pynput import keyboard as _pynput_kb  # type: ignore
+except Exception:
+    _pynput_kb = None
+
+
+class _GlobalHotkeyListener:
+    """Manages a pynput GlobalHotKeys listener that fires a callback from any focused window."""
+
+    # Map Qt portable-text modifier/key names to pynput bracket names.
+    _QT_TO_PYNPUT: dict[str, str] = {
+        "ctrl": "<ctrl>", "shift": "<shift>", "alt": "<alt>", "meta": "<cmd>",
+        "space": "<space>", "return": "<enter>", "enter": "<enter>",
+        "tab": "<tab>", "escape": "<esc>", "backspace": "<backspace>",
+        "delete": "<delete>", "insert": "<insert>",
+        "home": "<home>", "end": "<end>",
+        "pageup": "<page_up>", "pagedown": "<page_down>",
+        "up": "<up>", "down": "<down>", "left": "<left>", "right": "<right>",
+    }
+
+    def __init__(self, callback) -> None:
+        self._callback = callback
+        self._listener = None
+        self._combo: str = ""
+
+    def set_key_sequence(self, seq: QKeySequence) -> None:
+        combo = self._qt_to_pynput(seq.toString(QKeySequence.SequenceFormat.PortableText))
+        if combo == self._combo:
+            return
+        self._combo = combo
+        self._restart()
+
+    def stop(self) -> None:
+        if self._listener is not None:
+            try:
+                self._listener.stop()
+            except Exception:
+                pass
+            self._listener = None
+
+    def _restart(self) -> None:
+        self.stop()
+        if not self._combo or _pynput_kb is None:
+            return
+        try:
+            self._listener = _pynput_kb.GlobalHotKeys({self._combo: self._callback})
+            self._listener.daemon = True
+            self._listener.start()
+        except Exception:
+            pass
+
+    @classmethod
+    def _qt_to_pynput(cls, qt_str: str) -> str:
+        """Convert a Qt PortableText key sequence like 'Ctrl+F9' to '<ctrl>+<f9>'."""
+        if not qt_str:
+            return ""
+        parts = []
+        for part in qt_str.split("+"):
+            lower = part.lower()
+            if lower in cls._QT_TO_PYNPUT:
+                parts.append(cls._QT_TO_PYNPUT[lower])
+            elif lower.startswith("f") and lower[1:].isdigit() and 1 <= int(lower[1:]) <= 24:
+                parts.append(f"<{lower}>")
+            elif len(part) == 1:
+                parts.append(lower)
+            else:
+                return ""  # Unknown token — cannot map
+        return "+".join(parts)
 
 
 @dataclass(slots=True)
@@ -422,6 +492,8 @@ class X11SafeOverlay:
 class OverlayControlWindow(QMainWindow):
     # Emitted from background thread once the xdotool click subprocess finishes.
     _play_click_done = Signal()
+    # Emitted from the pynput listener thread to marshal hotkey activation to main thread.
+    _hotkey_activated = Signal()
 
     def __init__(self) -> None:
         super().__init__()
@@ -449,6 +521,10 @@ class OverlayControlWindow(QMainWindow):
         self._play_click_delay_ms = 500
         self._play_dialog_delay_ms = 500
         self._play_poll_delay_ms = 500
+        self._hotkey_sequence = QKeySequence("F9")
+        self._hotkey_shortcut: QShortcut | None = None
+        self._global_hotkey = _GlobalHotkeyListener(self._hotkey_activated.emit)
+        self._hotkey_activated.connect(self._start_and_play)
         self._play_click_done.connect(self._play_after_click)
         self._anchor_board_rect: tuple[int, int, int, int] | None = None  # (left, top, right, bottom) image px
         self._anchor_image_size: tuple[int, int] | None = None
@@ -595,6 +671,20 @@ class OverlayControlWindow(QMainWindow):
         runtime_btn_row.addWidget(self.click_delay_spin)
         runtime_btn_row.addStretch(1)
         runtime_layout.addLayout(runtime_btn_row)
+
+        hotkey_row = QHBoxLayout()
+        hotkey_row.setSpacing(8)
+        hotkey_label = QLabel("Play/Pause hotkey:")
+        self.hotkey_edit = QKeySequenceEdit(self._hotkey_sequence)
+        self.hotkey_edit.setMaximumSequenceLength(1)
+        self.hotkey_edit.setFixedWidth(120)
+        self.hotkey_edit.setToolTip("Global hotkey to start or stop automated play")
+        self.hotkey_edit.keySequenceChanged.connect(self._on_hotkey_changed)
+        hotkey_row.addWidget(hotkey_label)
+        hotkey_row.addWidget(self.hotkey_edit)
+        hotkey_row.addStretch(1)
+        runtime_layout.addLayout(hotkey_row)
+
         layout.addWidget(runtime_card)
 
         # ── Timing section ───────────────────────────────────────────────────
@@ -955,6 +1045,27 @@ class OverlayControlWindow(QMainWindow):
         self._update_window_name_label()
         self._set_status("No screenshot parsed yet.", level="info")
         self._refresh_monitor_list()
+        self._install_hotkey()
+
+    def _install_hotkey(self) -> None:
+        """Install the play/pause hotkey globally (pynput) with QShortcut as fallback."""
+        # Always keep a QShortcut so the key works even if pynput is unavailable.
+        if self._hotkey_shortcut is not None:
+            self._hotkey_shortcut.setEnabled(False)
+            self._hotkey_shortcut.deleteLater()
+            self._hotkey_shortcut = None
+        if not self._hotkey_sequence.isEmpty():
+            self._hotkey_shortcut = QShortcut(self._hotkey_sequence, self)
+            self._hotkey_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
+            self._hotkey_shortcut.activated.connect(self._start_and_play)
+
+        # Global listener (works even when the emulator window has focus).
+        if _pynput_kb is not None:
+            self._global_hotkey.set_key_sequence(self._hotkey_sequence)
+
+    def _on_hotkey_changed(self, seq: QKeySequence) -> None:
+        self._hotkey_sequence = seq
+        self._install_hotkey()
 
     def _apply_styles(self) -> None:
         self.setStyleSheet(
