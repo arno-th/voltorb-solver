@@ -805,6 +805,12 @@ class OverlayControlWindow(QMainWindow):
         self.show_anchor_region_btn = QPushButton("Show Anchor Region")
         self.show_anchor_region_btn.setObjectName("SecondaryButton")
         self.show_anchor_region_btn.clicked.connect(self._show_anchor_region_overlay)
+        self.capture_anchor_region_btn = QPushButton("Capture Anchor Region")
+        self.capture_anchor_region_btn.setObjectName("SecondaryButton")
+        self.capture_anchor_region_btn.setToolTip(
+            "Capture a screenshot and save the cropped anchor board region to the debug folder"
+        )
+        self.capture_anchor_region_btn.clicked.connect(self._capture_anchor_region_image)
         self.parse_all_clues_btn = QPushButton("Parse clues")
         self.parse_all_clues_btn.setObjectName("PrimaryButton")
         self.parse_all_clues_btn.clicked.connect(self.parse_all_clues)
@@ -820,6 +826,7 @@ class OverlayControlWindow(QMainWindow):
         debug_btn_row.addWidget(self.relabel_btn)
         debug_btn_row.addWidget(self.parse_anchors_btn)
         debug_btn_row.addWidget(self.show_anchor_region_btn)
+        debug_btn_row.addWidget(self.capture_anchor_region_btn)
         debug_btn_row.addWidget(self.parse_all_clues_btn)
         debug_btn_row.addWidget(self.parse_tiles_btn)
         debug_btn_row.addWidget(self.clear_btn)
@@ -2922,6 +2929,45 @@ class OverlayControlWindow(QMainWindow):
         self._anchor_board_rect = rect
         self._anchor_image_size = (img.shape[1], img.shape[0])
         return True
+
+    def _capture_anchor_region_image(self) -> None:
+        """Capture a screenshot, crop to the cached anchor board rect, and save it for template building."""
+        if _cv2 is None:
+            self._show_error("OpenCV (cv2) is required for anchor region capture.")
+            return
+        if self._anchor_board_rect is None or self._anchor_image_size is None:
+            self._set_status("No anchor region cached — run 'Parse Anchors' first.", "warning")
+            return
+
+        tmp_path = str(
+            Path(gettempdir())
+            / f"voltorb_anchor_region_full_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.png"
+        )
+        if not self._capture_game_screenshot(tmp_path):
+            return
+
+        image = _cv2.imread(tmp_path)
+        if image is None:
+            self._show_error("Failed to read captured screenshot.")
+            return
+
+        left, top, right, bottom = self._anchor_board_rect
+        img_h, img_w = image.shape[:2]
+        x0 = max(0, left)
+        y0 = max(0, top)
+        x1 = min(img_w, right)
+        y1 = min(img_h, bottom)
+        crop = image[y0:y1, x0:x1]
+        if crop.size == 0:
+            self._show_error("Anchor region crop is empty — board rect may be off-screen.")
+            return
+
+        out_dir = self._clue_dataset_root.parent / "anchor_region"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        out_path = out_dir / f"{stamp}_anchor_region.png"
+        _cv2.imwrite(str(out_path), crop)
+        self._set_status(f"Anchor region saved → {out_path}", "success")
 
     def _parse_anchors_debug(self) -> None:
         """Capture a screenshot, detect TR+BL anchors, and report the board rect."""

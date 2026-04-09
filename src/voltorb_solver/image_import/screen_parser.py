@@ -61,8 +61,12 @@ class ScreenBoardParser:
         self._tile_template_names: list[str] = []
         self._anchor_templates: list[np.ndarray] = []
         self._anchor_template_names: list[str] = []
+        self._anchor_alt_templates: list[np.ndarray] = []
+        self._anchor_alt_template_names: list[str] = []
         self._bl_anchor_templates: list[np.ndarray] = []
         self._bl_anchor_template_names: list[str] = []
+        self._bl_anchor_alt_templates: list[np.ndarray] = []
+        self._bl_anchor_alt_template_names: list[str] = []
         self._grid_layout: dict[str, object] | None = None
         env_debug = os.environ.get("VOLTORB_PARSER_DEBUG_DIR", "").strip()
         selected_debug_dir = debug_dir if debug_dir is not None else (env_debug or None)
@@ -916,38 +920,52 @@ class ScreenBoardParser:
         )
 
     def _load_anchor_templates(self) -> list[np.ndarray]:
-        if self._anchor_templates:
+        if self._anchor_templates or self._anchor_alt_templates:
             return self._anchor_templates
 
         templates, names = self._load_templates_by_keyword("anchor")
 
-        # Populate BL cache as a side effect while we have all templates in hand.
-        if not self._bl_anchor_templates:
-            bl_pairs = [(t, n) for t, n in zip(templates, names) if self._is_bl_anchor_name(n)]
-            self._bl_anchor_templates = [t for t, _ in bl_pairs]
-            self._bl_anchor_template_names = [n for _, n in bl_pairs]
-
-        preferred_templates: list[np.ndarray] = []
-        preferred_names: list[str] = []
+        # Split into alt and non-alt, populating BL caches as a side effect.
+        tr_regular: list[np.ndarray] = []
+        tr_regular_names: list[str] = []
+        tr_alt: list[np.ndarray] = []
+        tr_alt_names: list[str] = []
+        bl_regular: list[np.ndarray] = []
+        bl_regular_names: list[str] = []
+        bl_alt: list[np.ndarray] = []
+        bl_alt_names: list[str] = []
 
         for template, name in zip(templates, names):
+            is_alt = "_alt" in name.lower()
             if self._is_tr_anchor_name(name):
-                preferred_templates.append(template)
-                preferred_names.append(name)
+                (tr_alt if is_alt else tr_regular).append(template)
+                (tr_alt_names if is_alt else tr_regular_names).append(name)
+            elif self._is_bl_anchor_name(name):
+                (bl_alt if is_alt else bl_regular).append(template)
+                (bl_alt_names if is_alt else bl_regular_names).append(name)
 
-        if preferred_templates:
-            self._anchor_templates = preferred_templates
-            self._anchor_template_names = preferred_names
-            return self._anchor_templates
+        # Fall back to all anchors if the TR/BL heuristics matched nothing.
+        if not tr_regular and not tr_alt:
+            tr_regular = [t for t, n in zip(templates, names) if "_alt" not in n.lower()]
+            tr_regular_names = [n for n in names if "_alt" not in n.lower()]
+            tr_alt = [t for t, n in zip(templates, names) if "_alt" in n.lower()]
+            tr_alt_names = [n for n in names if "_alt" in n.lower()]
 
-        self._anchor_templates = templates
-        self._anchor_template_names = names
+        self._anchor_templates = tr_regular
+        self._anchor_template_names = tr_regular_names
+        self._anchor_alt_templates = tr_alt
+        self._anchor_alt_template_names = tr_alt_names
+        self._bl_anchor_templates = bl_regular
+        self._bl_anchor_template_names = bl_regular_names
+        self._bl_anchor_alt_templates = bl_alt
+        self._bl_anchor_alt_template_names = bl_alt_names
+
         return self._anchor_templates
 
     def _load_bl_anchor_templates(self) -> tuple[list[np.ndarray], list[str]]:
         """Return bottom-left corner anchor templates (lazy-loaded)."""
-        if not self._bl_anchor_templates:
-            self._load_anchor_templates()  # populates BL cache as a side effect
+        if not self._bl_anchor_templates and not self._bl_anchor_alt_templates:
+            self._load_anchor_templates()  # populates BL caches as a side effect
         return self._bl_anchor_templates, self._bl_anchor_template_names
 
     def _match_corner_anchor(
@@ -984,28 +1002,39 @@ class ScreenBoardParser:
     def find_board_corner_rect(self, image_path: str) -> tuple[int, int, int, int] | None:
         """Match top-right and bottom-left anchor templates and return the board bounding box.
 
+        Tries non-alt templates first; falls back to alt templates if the first attempt fails.
         Returns ``(left, top, right, bottom)`` in image pixels if both corners are
         found with sufficient confidence, otherwise ``None``.
         """
         gray = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
         if gray is None:
             return None
-        tr_templates = self._load_anchor_templates()
-        tr_names = self._anchor_template_names
-        bl_templates, bl_names = self._load_bl_anchor_templates()
-        if not tr_templates or not bl_templates:
-            return None
-        tr = self._match_corner_anchor(gray, tr_templates, tr_names, "top-right")
-        bl = self._match_corner_anchor(gray, bl_templates, bl_names, "bottom-left")
-        if tr is None or bl is None:
-            return None
-        left = int(round(bl["reference_x"]))
-        top = int(round(tr["reference_y"]))
-        right = int(round(tr["reference_x"]))
-        bottom = int(round(bl["reference_y"]))
-        if right <= left or bottom <= top:
-            return None
-        return (left, top, right, bottom)
+
+        self._load_anchor_templates()  # ensure all caches are populated
+
+        groups = [
+            (self._anchor_templates, self._anchor_template_names,
+             self._bl_anchor_templates, self._bl_anchor_template_names),
+            (self._anchor_alt_templates, self._anchor_alt_template_names,
+             self._bl_anchor_alt_templates, self._bl_anchor_alt_template_names),
+        ]
+
+        for tr_templates, tr_names, bl_templates, bl_names in groups:
+            if not tr_templates or not bl_templates:
+                continue
+            tr = self._match_corner_anchor(gray, tr_templates, tr_names, "top-right")
+            bl = self._match_corner_anchor(gray, bl_templates, bl_names, "bottom-left")
+            if tr is None or bl is None:
+                continue
+            left = int(round(bl["reference_x"]))
+            top = int(round(tr["reference_y"]))
+            right = int(round(tr["reference_x"]))
+            bottom = int(round(bl["reference_y"]))
+            if right <= left or bottom <= top:
+                continue
+            return (left, top, right, bottom)
+
+        return None
 
     def _load_templates_by_keyword(self, keyword: str) -> tuple[list[np.ndarray], list[str]]:
         repo_root = Path(__file__).resolve().parents[3]
