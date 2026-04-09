@@ -1913,10 +1913,22 @@ class OverlayControlWindow(QMainWindow):
         self.start_play_btn.setText("Stop Play")
 
         # Check if the Play Level dialog is showing before the board is visible.
-        play_level_region, _ = self._get_play_level_region()
-        if _TEXTBOX_PLAY_LEVEL_TEMPLATE_PATH.exists() and self._play_check_template_now(
-            play_level_region, _TEXTBOX_PLAY_LEVEL_TEMPLATE_PATH, _TEXTBOX_PLAY_LEVEL_MATCH_THRESHOLD
-        ):
+        # Search directly in the already-captured tmp_path rather than re-capturing, so
+        # there is no dependency on anchor coordinates or region fractions being correct.
+        _play_level_visible = False
+        if _TEXTBOX_PLAY_LEVEL_TEMPLATE_PATH.exists() and _cv2 is not None:
+            _img = _cv2.imread(tmp_path)
+            _tpl = _cv2.imread(str(_TEXTBOX_PLAY_LEVEL_TEMPLATE_PATH))
+            if _img is not None and _tpl is not None:
+                _ih, _iw = _img.shape[:2]
+                _th, _tw = _tpl.shape[:2]
+                if _tw <= _iw and _th <= _ih:
+                    _gray_img = _cv2.cvtColor(_img, _cv2.COLOR_BGR2GRAY)
+                    _gray_tpl = _cv2.cvtColor(_tpl, _cv2.COLOR_BGR2GRAY)
+                    _res = _cv2.matchTemplate(_gray_img, _gray_tpl, _cv2.TM_CCOEFF_NORMED)
+                    _, _score, _, _ = _cv2.minMaxLoc(_res)
+                    _play_level_visible = _score >= _TEXTBOX_PLAY_LEVEL_MATCH_THRESHOLD
+        if _play_level_visible:
             self._set_status("Play Level dialog detected — clicking to start new game…", "info")
             QTimer.singleShot(0, self._play_start_from_play_level)
             return
