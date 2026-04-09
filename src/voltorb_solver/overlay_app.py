@@ -12,7 +12,7 @@ import time
 from tempfile import gettempdir
 
 from PySide6.QtCore import Qt, QRect, QTimer, Signal
-from PySide6.QtGui import QColor, QGuiApplication, QKeySequence, QPixmap, QShortcut, QTextCursor
+from PySide6.QtGui import QBrush, QColor, QGuiApplication, QKeySequence, QPixmap, QShortcut, QTextCursor
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -30,6 +30,8 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSplitter,
     QTextEdit,
+    QTreeWidget,
+    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -569,7 +571,8 @@ class OverlayControlWindow(QMainWindow):
 
         # last-line dedup: (normalized_key, block_number, repeat_count)
         self._log_last_key: str | None = None
-        self._log_last_block: int = -1
+        self._log_last_item: QTreeWidgetItem | None = None
+        self._log_current_group: QTreeWidgetItem | None = None
         self._log_last_count: int = 0
 
         root = QWidget()
@@ -607,11 +610,14 @@ class OverlayControlWindow(QMainWindow):
         subtitle.setWordWrap(True)
         header_layout.addWidget(subtitle)
 
-        self.log_view = QTextEdit()
+        self.log_view = QTreeWidget()
         self.log_view.setObjectName("LogView")
-        self.log_view.setReadOnly(True)
+        self.log_view.setHeaderHidden(True)
+        self.log_view.setRootIsDecorated(True)
         self.log_view.setMinimumHeight(60)
-        self.log_view.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
+        self.log_view.setIndentation(14)
+        self.log_view.setSelectionMode(QTreeWidget.SelectionMode.NoSelection)
+        self.log_view.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         header_layout.addWidget(self.log_view)
         scroll_area = QScrollArea()
         scroll_area.setWidgetResizable(True)
@@ -1166,14 +1172,22 @@ class OverlayControlWindow(QMainWindow):
                 color: #5b7288;
             }
 
-            QTextEdit#LogView {
+            QTreeWidget#LogView {
                 border-radius: 8px;
                 border: 1px solid #d1deea;
                 background: #f8fbfd;
                 color: #1a2e40;
-                padding: 6px 8px;
+                padding: 2px;
                 font-size: 11px;
                 font-family: monospace;
+            }
+
+            QTreeWidget#LogView::item {
+                padding: 2px 4px;
+            }
+
+            QTreeWidget#LogView::item:hover {
+                background: #eaf2fb;
             }
 
             QComboBox#MonitorCombo {
@@ -2644,40 +2658,46 @@ class OverlayControlWindow(QMainWindow):
         """Replace digit runs with '#' so repeated-but-numbered messages share a dedup key."""
         return re.sub(r"\d+", "#", message)
 
-    def _set_status(self, message: str, level: str = "info") -> None:
+    def _set_status(self, message: str, level: str = "info", *, new_group: bool = False) -> None:
         color_map = {
-            "info":    "#2f4d66",
-            "success": "#1a6b3a",
-            "warning": "#7a5a00",
-            "error":   "#8b1a1a",
+            "info":    QColor("#2f4d66"),
+            "success": QColor("#1a6b3a"),
+            "warning": QColor("#7a5a00"),
+            "error":   QColor("#8b1a1a"),
         }
-        fg = color_map.get(level, color_map["info"])
+        color = color_map.get(level, color_map["info"])
         timestamp = datetime.now().strftime("%H:%M:%S")
-        safe_msg = message.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
         key = self._normalize_log_key(message)
-        if key == self._log_last_key and self._log_last_block >= 0:
+        if key == self._log_last_key and self._log_last_item is not None:
             self._log_last_count += 1
-            count_html = f' <span style="color:#888;">\u00d7{self._log_last_count}</span>'
-            html = f'<span style="color:{fg};">[{timestamp}] {safe_msg}{count_html}</span>'
-            block = self.log_view.document().findBlockByNumber(self._log_last_block)
-            if block.isValid():
-                cursor = QTextCursor(block)
-                cursor.movePosition(QTextCursor.MoveOperation.StartOfBlock)
-                cursor.movePosition(QTextCursor.MoveOperation.EndOfBlock, QTextCursor.MoveMode.KeepAnchor)
-                cursor.insertHtml(html)
-                sb = self.log_view.verticalScrollBar()
-                sb.setValue(sb.maximum())
-                return
-            # Block no longer valid — fall through to re-append
+            self._log_last_item.setText(
+                0, f"[{timestamp}] {message} ×{self._log_last_count}"
+            )
+            self._log_last_item.setForeground(0, QBrush(color))
+            self.log_view.scrollToItem(self._log_last_item)
+            return
 
-        html = f'<span style="color:{fg};">[{timestamp}] {safe_msg}</span>'
-        self.log_view.append(html)
+        if new_group:
+            # Collapse the previous group and start a new top-level one.
+            if self._log_current_group is not None:
+                self._log_current_group.setExpanded(False)
+            item = QTreeWidgetItem(self.log_view)
+            self._log_current_group = item
+        elif self._log_current_group is not None:
+            item = QTreeWidgetItem(self._log_current_group)
+            self._log_current_group.setExpanded(True)
+        else:
+            item = QTreeWidgetItem(self.log_view)
+            self._log_current_group = item
+
+        item.setText(0, f"[{timestamp}] {message}")
+        item.setForeground(0, QBrush(color))
+
         self._log_last_key = key
-        self._log_last_block = self.log_view.document().blockCount() - 1
+        self._log_last_item = item
         self._log_last_count = 1
-        sb = self.log_view.verticalScrollBar()
-        sb.setValue(sb.maximum())
+        self.log_view.scrollToItem(item)
 
     def _update_monitor_hint(self) -> None:
         screen = self._get_selected_screen()
@@ -3536,28 +3556,33 @@ class OverlayControlWindow(QMainWindow):
                 f"No tiles classified. {n_unmatched} open tile(s) saved to "
                 "assets/parser_debug/tile_dataset/unknown/ for labeling.",
                 level="warning",
+                new_group=True,
             )
         elif n_unmatched > 0:
             self._set_status(
                 f"Classified {n_revealed} revealed + {n_closed} closed. "
                 f"{n_unmatched} open tile(s) saved to unknown/ for labeling.",
                 level="warning",
+                new_group=True,
             )
         elif n_revealed == 0:
             self._set_status(
                 f"All {n_total} tiles appear face-down (closed). Overlay labels updated.",
                 level="success",
+                new_group=True,
             )
         elif n_revealed < n_total:
             self._set_status(
                 f"Classified {n_revealed} revealed + {n_closed} closed ({n_total} total). "
                 "Overlay labels updated.",
                 level="success",
+                new_group=True,
             )
         else:
             self._set_status(
                 f"Classified all {n_revealed} tiles. Overlay labels updated.",
                 level="success",
+                new_group=True,
             )
 
     def _push_clues_to_game_state(self) -> None:
