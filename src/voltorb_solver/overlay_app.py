@@ -2209,14 +2209,14 @@ class OverlayControlWindow(QMainWindow):
             self.x11_overlay.hide()
             self.simple_overlay.hide()
         if is_clear:
-            self._set_status("  Game Clear detected — waiting for Play Level prompt…", "success")
+            self._set_status("  Game Clear detected — waiting for Play Level prompt…", "success", new_group=True)
             self.stats.record_win()
             self.stats_panel.refresh(self.stats.lifetime, self.stats.session)
             self._play_dialog_steps = 0
             QTimer.singleShot(self._play_dialog_delay_ms, self._play_wait_for_play_level)
             return
         if is_failed:
-            self._set_status("  Game Failed (voltorb!) detected — advancing to Play Level prompt…", "warning")
+            self._set_status("  Game Failed (voltorb!) detected — advancing to Play Level prompt…", "warning", new_group=True)
             self.stats.record_bomb()
             self.stats_panel.refresh(self.stats.lifetime, self.stats.session)
             self._play_dialog_steps = 0
@@ -2248,12 +2248,12 @@ class OverlayControlWindow(QMainWindow):
 
         if has_play_level:
             if self._play_forever:
-                self._set_status("  Play Level prompt detected after game failed — starting new game…", "warning")
+                self._set_status("  Play Level prompt detected after game failed — starting new game…", "warning", new_group=True)
                 self._play_iteration = 0
                 self._play_dialog_steps = 0
                 QTimer.singleShot(0, self._play_start_from_play_level)
             else:
-                self._set_status("  Play Level prompt detected after game failed — stopping.", "warning")
+                self._set_status("  Play Level prompt detected after game failed — stopping.", "warning", new_group=True)
                 self._play_level_running = False
                 self.start_play_btn.setText("Start + Play")
                 self.clear_overlay()
@@ -2307,12 +2307,12 @@ class OverlayControlWindow(QMainWindow):
 
         if has_play_level:
             if self._play_forever:
-                self._set_status("  Play Level prompt detected — starting new game…", "success")
+                self._set_status("  Play Level prompt detected — starting new game…", "success", new_group=True)
                 self._play_iteration = 0
                 self._play_dialog_steps = 0
                 QTimer.singleShot(0, self._play_start_from_play_level)
             else:
-                self._set_status("  Play Level prompt detected — game clear complete.", "success")
+                self._set_status("  Play Level prompt detected — game clear complete.", "success", new_group=True)
                 self._play_level_running = False
                 self.start_play_btn.setText("Start + Play")
                 self.clear_overlay()
