@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
     QFrame,
+    QGridLayout,
     QSpinBox,
     QHBoxLayout,
     QKeySequenceEdit,
@@ -660,7 +661,7 @@ class OverlayControlWindow(QMainWindow):
         config_header_label.setObjectName("FieldLabel")
         config_header_row.addWidget(config_header_label)
         config_header_row.addStretch(1)
-        self.config_toggle_btn = QPushButton("\u25bc Hide")
+        self.config_toggle_btn = QPushButton("\u25b6 Show")
         self.config_toggle_btn.setObjectName("SecondaryButton")
         self.config_toggle_btn.clicked.connect(self._toggle_config_section)
         config_header_row.addWidget(self.config_toggle_btn)
@@ -672,43 +673,35 @@ class OverlayControlWindow(QMainWindow):
         config_content_layout.setSpacing(8)
 
         # Monitor selection
-        monitor_row = QHBoxLayout()
-        monitor_row.setSpacing(8)
-        monitor_label = QLabel("Capture/Overlay Monitor")
+        target_row = QHBoxLayout()
+        target_row.setSpacing(8)
+        monitor_label = QLabel("Monitor")
         monitor_label.setObjectName("FieldLabel")
-        monitor_row.addWidget(monitor_label)
+        target_row.addWidget(monitor_label)
         self.monitor_combo = QComboBox()
         self.monitor_combo.setObjectName("MonitorCombo")
         self.monitor_combo.currentIndexChanged.connect(self._on_monitor_changed)
-        monitor_row.addWidget(self.monitor_combo)
-        self.refresh_monitors_btn = QPushButton("Refresh Monitors")
+        target_row.addWidget(self.monitor_combo)
+        self.refresh_monitors_btn = QPushButton("Refresh")
         self.refresh_monitors_btn.setObjectName("SecondaryButton")
+        self.refresh_monitors_btn.setToolTip("Refresh the monitor list")
         self.refresh_monitors_btn.clicked.connect(self._refresh_monitor_list)
-        monitor_row.addWidget(self.refresh_monitors_btn)
-        config_content_layout.addLayout(monitor_row)
-
-        self.monitor_hint = QLabel("No monitor selected.")
+        target_row.addWidget(self.refresh_monitors_btn)
+        self.monitor_hint = QLabel()
         self.monitor_hint.setObjectName("HintLabel")
-        self.monitor_hint.setWordWrap(True)
-        config_content_layout.addWidget(self.monitor_hint)
-
-        window_row = QHBoxLayout()
-        window_row.setSpacing(8)
-        self.target_window_btn = QPushButton("Pick Target Window")
+        target_row.addWidget(self.monitor_hint)
+        target_row.addSpacing(16)
+        self.target_window_btn = QPushButton("Pick Window")
         self.target_window_btn.setObjectName("SecondaryButton")
         self.target_window_btn.clicked.connect(self._handle_target_window_button)
-        window_row.addWidget(self.target_window_btn)
+        target_row.addWidget(self.target_window_btn)
         self.window_name_label = QLabel("No window selected.")
         self.window_name_label.setObjectName("HintLabel")
         self.window_name_label.setWordWrap(False)
-        window_row.addWidget(self.window_name_label, 1)
-        config_content_layout.addLayout(window_row)
+        target_row.addWidget(self.window_name_label, 1)
+        config_content_layout.addLayout(target_row)
 
-        # Timing delays
-        config_row1 = QHBoxLayout()
-        config_row1.setSpacing(8)
-
-        click_delay_label = QLabel("Click delay:")
+        # Timing delays and hotkey
         self.click_delay_spin = QSpinBox()
         self.click_delay_spin.setRange(100, 5000)
         self.click_delay_spin.setSingleStep(100)
@@ -717,7 +710,6 @@ class OverlayControlWindow(QMainWindow):
         self.click_delay_spin.setToolTip("Delay between clicking a tile and checking for a text box")
         self.click_delay_spin.valueChanged.connect(lambda v: setattr(self, '_play_click_delay_ms', v))
 
-        dialog_delay_label = QLabel("Dialog advance delay:")
         self.dialog_delay_spin = QSpinBox()
         self.dialog_delay_spin.setRange(100, 5000)
         self.dialog_delay_spin.setSingleStep(100)
@@ -730,7 +722,6 @@ class OverlayControlWindow(QMainWindow):
             lambda v: setattr(self, '_play_dialog_delay_ms', v)
         )
 
-        poll_delay_label = QLabel("Play Level poll interval:")
         self.poll_delay_spin = QSpinBox()
         self.poll_delay_spin.setRange(100, 5000)
         self.poll_delay_spin.setSingleStep(100)
@@ -743,29 +734,25 @@ class OverlayControlWindow(QMainWindow):
             lambda v: setattr(self, '_play_poll_delay_ms', v)
         )
 
-        config_row1.addWidget(click_delay_label)
-        config_row1.addWidget(self.click_delay_spin)
-        config_row1.addSpacing(16)
-        config_row1.addWidget(dialog_delay_label)
-        config_row1.addWidget(self.dialog_delay_spin)
-        config_row1.addSpacing(16)
-        config_row1.addWidget(poll_delay_label)
-        config_row1.addWidget(self.poll_delay_spin)
-        config_row1.addStretch(1)
-        config_content_layout.addLayout(config_row1)
-
-        config_row2 = QHBoxLayout()
-        config_row2.setSpacing(8)
-        hotkey_label = QLabel("Play/Pause hotkey:")
         self.hotkey_edit = QKeySequenceEdit(self._hotkey_sequence)
         self.hotkey_edit.setMaximumSequenceLength(1)
         self.hotkey_edit.setFixedWidth(120)
         self.hotkey_edit.setToolTip("Global hotkey to start or stop automated play")
         self.hotkey_edit.keySequenceChanged.connect(self._on_hotkey_changed)
-        config_row2.addWidget(hotkey_label)
-        config_row2.addWidget(self.hotkey_edit)
-        config_row2.addStretch(1)
-        config_content_layout.addLayout(config_row2)
+
+        timing_grid = QGridLayout()
+        timing_grid.setHorizontalSpacing(8)
+        timing_grid.setVerticalSpacing(6)
+        timing_grid.setColumnStretch(4, 1)
+        timing_grid.addWidget(QLabel("Click delay:"), 0, 0)
+        timing_grid.addWidget(self.click_delay_spin, 0, 1)
+        timing_grid.addWidget(QLabel("Dialog delay:"), 0, 2)
+        timing_grid.addWidget(self.dialog_delay_spin, 0, 3)
+        timing_grid.addWidget(QLabel("Poll interval:"), 1, 0)
+        timing_grid.addWidget(self.poll_delay_spin, 1, 1)
+        timing_grid.addWidget(QLabel("Hotkey:"), 1, 2)
+        timing_grid.addWidget(self.hotkey_edit, 1, 3)
+        config_content_layout.addLayout(timing_grid)
 
         config_layout.addWidget(self.config_content)
         self.config_content.setVisible(False)
@@ -2634,12 +2621,12 @@ class OverlayControlWindow(QMainWindow):
     def _update_monitor_hint(self) -> None:
         screen = self._get_selected_screen()
         if screen is None:
-            self.monitor_hint.setText("No monitor selected.")
+            self.monitor_hint.setText("")
             return
 
         geo = screen.geometry()
         self.monitor_hint.setText(
-            f"Selected monitor geometry: {geo.width()}x{geo.height()} at ({geo.x()}, {geo.y()})."
+            f"{geo.width()}×{geo.height()} at ({geo.x()}, {geo.y()})"
         )
 
     def _update_window_name_label(self) -> None:
@@ -2647,18 +2634,19 @@ class OverlayControlWindow(QMainWindow):
             self.window_name_label.setText("No window selected.")
         else:
             name = self.state.target_window_name or "Unnamed window"
-            self.window_name_label.setText(f"{name}  (id: {self.state.target_window_id})")
+            self.window_name_label.setText(name)
+            self.window_name_label.setToolTip(f"Window ID: {self.state.target_window_id}")
 
     def _update_window_hint(self) -> None:
         self._update_window_name_label()
 
     def _update_target_window_button(self) -> None:
         if self.state.target_window_id is None:
-            self.target_window_btn.setText("Pick Target Window")
+            self.target_window_btn.setText("Pick Window")
             self.target_window_btn.setToolTip("Select an emulator window for direct capture.")
             return
 
-        self.target_window_btn.setText("Clear Target Window")
+        self.target_window_btn.setText("Clear Window")
         self.target_window_btn.setToolTip("Clear the selected target window and capture from monitor.")
 
     def _handle_target_window_button(self) -> None:
