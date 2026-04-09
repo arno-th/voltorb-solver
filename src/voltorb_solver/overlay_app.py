@@ -1105,19 +1105,20 @@ class OverlayControlWindow(QMainWindow):
 
     def _install_hotkey(self) -> None:
         """Install the play/pause hotkey globally (pynput) with QShortcut as fallback."""
-        # Always keep a QShortcut so the key works even if pynput is unavailable.
         if self._hotkey_shortcut is not None:
             self._hotkey_shortcut.setEnabled(False)
             self._hotkey_shortcut.deleteLater()
             self._hotkey_shortcut = None
-        if not self._hotkey_sequence.isEmpty():
-            self._hotkey_shortcut = QShortcut(self._hotkey_sequence, self)
-            self._hotkey_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
-            self._hotkey_shortcut.activated.connect(self._on_hotkey_triggered)
 
         # Global listener (works even when the emulator window has focus).
         if _pynput_kb is not None:
             self._global_hotkey.set_key_sequence(self._hotkey_sequence)
+        else:
+            # pynput unavailable — fall back to QShortcut (app-focus only).
+            if not self._hotkey_sequence.isEmpty():
+                self._hotkey_shortcut = QShortcut(self._hotkey_sequence, self)
+                self._hotkey_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
+                self._hotkey_shortcut.activated.connect(self._on_hotkey_triggered)
 
     def _on_hotkey_triggered(self) -> None:
         # Ignore triggers while recording a new shortcut.
