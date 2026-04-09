@@ -12,7 +12,7 @@ import time
 from tempfile import gettempdir
 
 from PySide6.QtCore import Qt, QRect, QTimer, Signal
-from PySide6.QtGui import QColor, QGuiApplication, QKeySequence, QPixmap, QShortcut
+from PySide6.QtGui import QColor, QGuiApplication, QKeySequence, QPixmap, QShortcut, QTextCursor
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -566,6 +566,11 @@ class OverlayControlWindow(QMainWindow):
         self._game_failed_w = _TEXTBOX_GAME_FAILED_BOARD_W
         self._game_failed_h = _TEXTBOX_GAME_FAILED_BOARD_H
         self._load_textbox_offsets()
+
+        # last-line dedup: (normalized_key, block_number, repeat_count)
+        self._log_last_key: str | None = None
+        self._log_last_block: int = -1
+        self._log_last_count: int = 0
 
         root = QWidget()
         root.setObjectName("RootPanel")
@@ -2622,6 +2627,10 @@ class OverlayControlWindow(QMainWindow):
             # overlay data; just re-show the windows.
             self.simple_overlay.show()
 
+    def _normalize_log_key(self, message: str) -> str:
+        """Replace digit runs with '#' so repeated-but-numbered messages share a dedup key."""
+        return re.sub(r"\d+", "#", message)
+
     def _set_status(self, message: str, level: str = "info") -> None:
         color_map = {
             "info":    "#2f4d66",
@@ -2632,8 +2641,28 @@ class OverlayControlWindow(QMainWindow):
         fg = color_map.get(level, color_map["info"])
         timestamp = datetime.now().strftime("%H:%M:%S")
         safe_msg = message.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+        key = self._normalize_log_key(message)
+        if key == self._log_last_key and self._log_last_block >= 0:
+            self._log_last_count += 1
+            count_html = f' <span style="color:#888;">\u00d7{self._log_last_count}</span>'
+            html = f'<span style="color:{fg};">[{timestamp}] {safe_msg}{count_html}</span>'
+            block = self.log_view.document().findBlockByNumber(self._log_last_block)
+            if block.isValid():
+                cursor = QTextCursor(block)
+                cursor.movePosition(QTextCursor.MoveOperation.StartOfBlock)
+                cursor.movePosition(QTextCursor.MoveOperation.EndOfBlock, QTextCursor.MoveMode.KeepAnchor)
+                cursor.insertHtml(html)
+                sb = self.log_view.verticalScrollBar()
+                sb.setValue(sb.maximum())
+                return
+            # Block no longer valid — fall through to re-append
+
         html = f'<span style="color:{fg};">[{timestamp}] {safe_msg}</span>'
         self.log_view.append(html)
+        self._log_last_key = key
+        self._log_last_block = self.log_view.document().blockCount() - 1
+        self._log_last_count = 1
         sb = self.log_view.verticalScrollBar()
         sb.setValue(sb.maximum())
 
