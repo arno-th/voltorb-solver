@@ -1949,8 +1949,6 @@ class OverlayControlWindow(QMainWindow):
             return
 
         # Normal flow: board is visible — parse it and start playing.
-        if not self.prob_overlay_btn.isChecked():
-            self.prob_overlay_btn.setChecked(True)
         if not self._parse_and_apply(
             tmp_path, capture_signature=capture_signature, relabel_reason="label/relabel game"
         ):
@@ -2398,8 +2396,6 @@ class OverlayControlWindow(QMainWindow):
         self.relabel_regions()
         self.parse_all_clues()
         self.parse_tiles()
-        if not self.prob_overlay_btn.isChecked():
-            self.prob_overlay_btn.setChecked(True)
         if not [r for r in self._last_parse_regions if self._is_tile_region(r.name)]:
             self._play_stop(
                 "No tile regions found after relabeling — board may not be ready yet. Try again.",
