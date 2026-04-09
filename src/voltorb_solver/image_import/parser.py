@@ -68,7 +68,7 @@ class ImageParser:
     # Normalized clue-field bounds (x0, y0, x1, y1) inside a single clue box.
     # Used by overlay_app.py to generate debug sub-region overlays.
     _TOTAL_OCR_BOUNDS = (0.30, 0.02, 0.99, 0.42)
-    _VOLTORB_OCR_BOUNDS = (0.615, 0.50, 0.99, 0.98)
+    _VOLTORB_OCR_BOUNDS = (0.64, 0.50, 0.99, 0.98)
 
     _TEMPLATE_MIN_SCORE = 0.85
     TILE_CLOSED_MIN_SCORE = 0.75
@@ -138,6 +138,24 @@ class ImageParser:
         channel = np.max(roi, axis=2) if roi.ndim == 3 else roi
         return cv2.threshold(channel, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
 
+    def _fit_tight_to_canvas(self, tight: np.ndarray) -> np.ndarray:
+        """Scale a binary tight-crop into _CLUE_DIGIT_CANONICAL_SIZE preserving aspect ratio,
+        then centre it on a zero-padded canvas.  All templates and queries end up at the
+        same fixed size so matching comparisons are never distorted by minor crop differences."""
+        cw, ch = self._CLUE_DIGIT_CANONICAL_SIZE
+        if cv2 is None or tight.size == 0:
+            return np.zeros((ch, cw), dtype=np.uint8)
+        h, w = tight.shape[:2]
+        scale = min(cw / w, ch / h)
+        new_w = max(1, int(round(w * scale)))
+        new_h = max(1, int(round(h * scale)))
+        scaled = cv2.resize(tight, (new_w, new_h), interpolation=cv2.INTER_AREA)
+        canvas = np.zeros((ch, cw), dtype=np.uint8)
+        y_off = (ch - new_h) // 2
+        x_off = (cw - new_w) // 2
+        canvas[y_off:y_off + new_h, x_off:x_off + new_w] = scaled
+        return canvas
+
     def _prepare_template_image(self, roi: np.ndarray) -> np.ndarray | None:
         bw = self._binarize(roi)
         if bw is None:
@@ -152,10 +170,9 @@ class ImageParser:
         x0, x1 = int(xs.min()), int(xs.max()) + 1
         y0, y1 = int(ys.min()), int(ys.max()) + 1
         tight = bw[y0:y1, x0:x1]
-        # Return tight crop at native resolution — no resize.
-        # All clue regions from the same game/monitor are the same pixel size so
-        # template and live ROI crops will match exactly without scaling.
-        return tight
+        # Fit to canonical canvas so all stored templates share the same fixed size.
+        # This prevents minor crop-boundary differences from distorting comparisons.
+        return self._fit_tight_to_canvas(tight)
 
     def _load_clue_templates(self) -> None:
         if self._templates_loaded or cv2 is None:
@@ -301,9 +318,9 @@ class ImageParser:
         second_score = -1.0
         seen_templates: set[int] = set()
 
-        # Tight-crop the live ROI — no resize. Each template stores its own native
-        # tight-crop size; we resize the query to match that size exactly before
-        # scoring so the 1×1 NCC response is a pure shape similarity at full detail.
+        # Tight-crop the live ROI, then fit to the canonical canvas — same transform
+        # applied to all stored templates.  This eliminates distortion from minor
+        # crop-boundary differences (e.g. a serif being 1 px outside the sub-field).
         bw_tight_ys, bw_tight_xs = np.where(bw > 0)
         if len(bw_tight_xs) == 0:
             if save_if_unmatched:
@@ -312,6 +329,7 @@ class ImageParser:
         bx0, bx1 = int(bw_tight_xs.min()), int(bw_tight_xs.max()) + 1
         by0, by1 = int(bw_tight_ys.min()), int(bw_tight_ys.max()) + 1
         bw_tight = bw[by0:by1, bx0:bx1]
+        query = self._fit_tight_to_canvas(bw_tight)
 
         for bank in (primary_bank, fallback_bank):
             for value, templates in bank.items():
@@ -322,12 +340,6 @@ class ImageParser:
                     if tid in seen_templates:
                         continue
                     seen_templates.add(tid)
-                    th, tw = template.shape[:2]
-                    query = (
-                        cv2.resize(bw_tight, (tw, th), interpolation=cv2.INTER_AREA)
-                        if (bw_tight.shape[0] != th or bw_tight.shape[1] != tw)
-                        else bw_tight
-                    )
                     result = cv2.matchTemplate(query, template, cv2.TM_CCOEFF_NORMED)
                     _, max_val, _, _ = cv2.minMaxLoc(result)
                     score = float(max_val)
@@ -398,6 +410,7 @@ class ImageParser:
         bx0, bx1 = int(bw_tight_xs.min()), int(bw_tight_xs.max()) + 1
         by0, by1 = int(bw_tight_ys.min()), int(bw_tight_ys.max()) + 1
         bw_tight = bw[by0:by1, bx0:bx1]
+        query = self._fit_tight_to_canvas(bw_tight)
 
         results: list[tuple[int, float, np.ndarray]] = []
         seen_templates: set[int] = set()
@@ -413,12 +426,6 @@ class ImageParser:
                     if tid in seen_templates:
                         continue
                     seen_templates.add(tid)
-                    th, tw = template.shape[:2]
-                    query = (
-                        cv2.resize(bw_tight, (tw, th), interpolation=cv2.INTER_AREA)
-                        if (bw_tight.shape[0] != th or bw_tight.shape[1] != tw)
-                        else bw_tight
-                    )
                     result = cv2.matchTemplate(query, template, cv2.TM_CCOEFF_NORMED)
                     _, max_val, _, _ = cv2.minMaxLoc(result)
                     score = float(max_val)
@@ -431,7 +438,7 @@ class ImageParser:
             for value, (score, tpl) in best_per_value.items()
         ]
         results.sort(key=lambda t: t[1], reverse=True)
-        return bw_tight, results[:n]
+        return query, results[:n]
 
     def _save_unmatched_template_sample(self, roi: np.ndarray, *, kind: str, axis: str, source_tag: str) -> None:
         if cv2 is None or roi.size == 0:
@@ -949,12 +956,12 @@ class ImageParser:
             source_tag="debug:total",
         )
 
-        # --- top-2 match details for debugging ---
-        voltorbs_canonical, voltorbs_top2 = self._match_number_template_top_n(
-            voltorbs_roi, kind="bottom", axis=axis, min_value=0, max_value=5
+        # --- full match details for debugging ---
+        voltorbs_canonical, voltorbs_all = self._match_number_template_top_n(
+            voltorbs_roi, kind="bottom", axis=axis, min_value=0, max_value=5, n=6
         )
-        total_canonical, total_top2 = self._match_number_template_top_n(
-            total_roi, kind="top", axis=axis, min_value=0, max_value=15
+        total_canonical, total_all = self._match_number_template_top_n(
+            total_roi, kind="top", axis=axis, min_value=0, max_value=15, n=16
         )
 
         if voltorbs_canonical is not None:
@@ -962,9 +969,9 @@ class ImageParser:
         if total_canonical is not None:
             cv2.imwrite(str(normalized_total_path), total_canonical)
 
-        for rank, (val, score, tpl) in enumerate(voltorbs_top2, start=1):
+        for rank, (val, score, tpl) in enumerate(voltorbs_all, start=1):
             cv2.imwrite(str(run_dir / f"voltorbs_match{rank}_v{val}_s{score:.3f}.png"), tpl)
-        for rank, (val, score, tpl) in enumerate(total_top2, start=1):
+        for rank, (val, score, tpl) in enumerate(total_all, start=1):
             cv2.imwrite(str(run_dir / f"total_match{rank}_v{val}_s{score:.3f}.png"), tpl)
 
         voltorbs_text = (
@@ -978,18 +985,18 @@ class ImageParser:
             else f"no_match score={total_score:.3f}"
         )
 
-        def _top2_log(top2: list[tuple[int, float, np.ndarray]]) -> str:
-            return "  |  ".join(f"#{i+1} v={v} s={s:.3f}" for i, (v, s, _) in enumerate(top2))
+        def _all_log(results: list[tuple[int, float, np.ndarray]]) -> str:
+            return "  |  ".join(f"#{i+1} v={v} s={s:.3f}" for i, (v, s, _) in enumerate(results))
 
         def _tiebreak_log(
             bw_tight: np.ndarray | None,
-            top2: list[tuple[int, float, np.ndarray]],
+            results: list[tuple[int, float, np.ndarray]],
             kind: str,
         ) -> str:
-            if bw_tight is None or len(top2) < 2:
+            if bw_tight is None or len(results) < 2:
                 return "n/a"
-            v1, s1, _ = top2[0]
-            v2, s2, _ = top2[1]
+            v1, s1, _ = results[0]
+            v2, s2, _ = results[1]
             margin = s1 - s2
             if margin >= self._HOLE_TIEBREAK_MARGIN:
                 return f"skipped(margin={margin:.3f}>={self._HOLE_TIEBREAK_MARGIN})"
@@ -1018,10 +1025,10 @@ class ImageParser:
             f"total_value={total_value}",
             f"voltorbs_score={voltorbs_score:.3f}",
             f"total_score={total_score:.3f}",
-            f"voltorbs_top2=[{_top2_log(voltorbs_top2)}]",
-            f"total_top2=[{_top2_log(total_top2)}]",
-            f"voltorbs_tiebreak={_tiebreak_log(voltorbs_canonical, voltorbs_top2, 'bottom')}",
-            f"total_tiebreak={_tiebreak_log(total_canonical, total_top2, 'top')}",
+            f"voltorbs_all=[{_all_log(voltorbs_all)}]",
+            f"total_all=[{_all_log(total_all)}]",
+            f"voltorbs_tiebreak={_tiebreak_log(voltorbs_canonical, voltorbs_all, 'bottom')}",
+            f"total_tiebreak={_tiebreak_log(total_canonical, total_all, 'top')}",
         ]
         log_path.write_text("\n".join(log_lines) + "\n", encoding="utf-8")
 
