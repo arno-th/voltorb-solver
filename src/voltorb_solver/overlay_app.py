@@ -1352,15 +1352,21 @@ class OverlayControlWindow(QMainWindow):
             return
 
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        safe_name = re.sub(r"[^\w\-]", "_", region_name)
         if self._is_clue_region(region_name):
             out_dir = self._clue_dataset_root / "unknown"
+            axis_tag = "row" if region_name.startswith("r") else "col"
+            sub_tag = "t" if subsection == "total" else "v" if subsection == "voltorbs" else subsection
+            filename = f"clue_{axis_tag}_{sub_tag}_{stamp}.png"
         elif self._is_tile_region(region_name):
             out_dir = self._tile_dataset_root / "unknown"
+            safe_name = re.sub(r"[^\w\-]", "_", region_name)
+            filename = f"{stamp}_{safe_name}_{subsection}.png"
         else:
             out_dir = Path(gettempdir())
+            safe_name = re.sub(r"[^\w\-]", "_", region_name)
+            filename = f"{stamp}_{safe_name}_{subsection}.png"
         out_dir.mkdir(parents=True, exist_ok=True)
-        out_path = out_dir / f"{stamp}_{safe_name}_{subsection}.png"
+        out_path = out_dir / filename
         _cv2.imwrite(str(out_path), crop)
 
         self._set_status(
