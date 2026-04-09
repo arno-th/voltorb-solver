@@ -2174,13 +2174,26 @@ class OverlayControlWindow(QMainWindow):
 
         self._set_status(f"  Step {step} dialog {ds}: checking for textbox…")
         # Capture the screen once and run all template checks in a single pass.
-        has_textbox, is_clear, is_failed = self._play_check_templates_now([
+        has_textbox, is_clear, is_failed, has_play_level = self._play_check_templates_now([
             (self._get_textbox_region()[0], _TEXTBOX_TEMPLATE_PATH, _TEXTBOX_MATCH_THRESHOLD),
             (self._get_game_clear_region()[0], _TEXTBOX_GAME_CLEAR_TEMPLATE_PATH, _TEXTBOX_GAME_CLEAR_MATCH_THRESHOLD),
             (self._get_game_failed_region()[0], _TEXTBOX_GAME_FAILED_TEMPLATE_PATH, _TEXTBOX_GAME_FAILED_MATCH_THRESHOLD),
+            (self._get_play_level_region()[0], _TEXTBOX_PLAY_LEVEL_TEMPLATE_PATH, _TEXTBOX_PLAY_LEVEL_MATCH_THRESHOLD),
         ])
 
         if not has_textbox:
+            # The game-failed textbox auto-fades; if Play Level is already visible, the
+            # failed textbox was missed.  Treat this as a bomb and advance normally.
+            if has_play_level:
+                self._set_status(
+                    f"  Step {step} dialog {ds}: game-failed textbox autofaded — "
+                    "Play Level prompt detected, recording bomb…", "warning"
+                )
+                self.stats.record_bomb()
+                self.stats_panel.refresh(self.stats.lifetime, self.stats.session)
+                self._play_dialog_steps = 0
+                QTimer.singleShot(0, self._play_wait_for_play_level_after_fail)
+                return
             self._set_status(f"  Step {step} dialog {ds}: no textbox — re-evaluating board…")
             # Re-enable overlays now that the textbox is gone.
             if self.overlay_btn.isChecked():
