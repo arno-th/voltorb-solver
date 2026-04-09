@@ -608,8 +608,14 @@ class OverlayControlWindow(QMainWindow):
         self.log_view.setMinimumHeight(60)
         self.log_view.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
         header_layout.addWidget(self.log_view)
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll_area.setWidget(bottom_pane)
+
         splitter.addWidget(header_card)
-        splitter.addWidget(bottom_pane)
+        splitter.addWidget(scroll_area)
         splitter.setSizes([200, 400])
 
         # ── Runtime section ──────────────────────────────────────────────────
