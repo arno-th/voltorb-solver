@@ -538,9 +538,11 @@ class OverlayControlWindow(QMainWindow):
         self._play_level_running = False
         self._play_iteration = 0
         self._play_dialog_steps = 0
+        self._play_step_t0: float = 0.0
         self._play_click_delay_ms = 500
         self._play_dialog_delay_ms = 500
         self._play_poll_delay_ms = 500
+        self._play_refresh_delay_ms = 1000
         self._play_forever = False
         self._hotkey_sequence = QKeySequence("P")
         self._hotkey_shortcut: QShortcut | None = None
@@ -751,6 +753,18 @@ class OverlayControlWindow(QMainWindow):
             lambda v: setattr(self, '_play_poll_delay_ms', v)
         )
 
+        self.refresh_delay_spin = QSpinBox()
+        self.refresh_delay_spin.setRange(100, 5000)
+        self.refresh_delay_spin.setSingleStep(100)
+        self.refresh_delay_spin.setValue(self._play_refresh_delay_ms)
+        self.refresh_delay_spin.setSuffix(" ms")
+        self.refresh_delay_spin.setToolTip(
+            "Delay between a tile reveal (no dialog) and the next step"
+        )
+        self.refresh_delay_spin.valueChanged.connect(
+            lambda v: setattr(self, '_play_refresh_delay_ms', v)
+        )
+
         self.hotkey_edit = QKeySequenceEdit(self._hotkey_sequence)
         self.hotkey_edit.setMaximumSequenceLength(1)
         self.hotkey_edit.setFixedWidth(120)
@@ -767,8 +781,10 @@ class OverlayControlWindow(QMainWindow):
         timing_grid.addWidget(self.dialog_delay_spin, 0, 3)
         timing_grid.addWidget(QLabel("Poll interval:"), 1, 0)
         timing_grid.addWidget(self.poll_delay_spin, 1, 1)
-        timing_grid.addWidget(QLabel("Hotkey:"), 1, 2)
-        timing_grid.addWidget(self.hotkey_edit, 1, 3)
+        timing_grid.addWidget(QLabel("Refresh delay:"), 1, 2)
+        timing_grid.addWidget(self.refresh_delay_spin, 1, 3)
+        timing_grid.addWidget(QLabel("Hotkey:"), 2, 0)
+        timing_grid.addWidget(self.hotkey_edit, 2, 1)
         config_content_layout.addLayout(timing_grid)
 
         config_layout.addWidget(self.config_content)
@@ -2108,6 +2124,7 @@ class OverlayControlWindow(QMainWindow):
             return
 
         self._play_iteration += 1
+        self._play_step_t0 = time.perf_counter()
         step = self._play_iteration
         self._set_status(f"── Step {step}: finding best tile…")
 
@@ -2156,7 +2173,8 @@ class OverlayControlWindow(QMainWindow):
             return
         step = self._play_iteration
         delay_ms = self._play_click_delay_ms
-        self._set_status(f"Step {step}: click sent — waiting {delay_ms} ms for game response…")
+        elapsed_ms = int((time.perf_counter() - self._play_step_t0) * 1000)
+        self._set_status(f"Step {step}: click sent (+{elapsed_ms}ms) — waiting {delay_ms} ms for game response…")
         self._play_dialog_steps = 0
         QTimer.singleShot(delay_ms, self._play_check_dialog_step)
 
@@ -2200,7 +2218,7 @@ class OverlayControlWindow(QMainWindow):
                 self.simple_overlay.show()
             self._refresh_tiles()
             if self._play_level_running:
-                QTimer.singleShot(1000, self._play_step)
+                QTimer.singleShot(self._play_refresh_delay_ms, self._play_step)
             return
 
         self._set_status(f"  Step {step} dialog {ds}: textbox present — checking for Game Clear / Game Failed…")
@@ -2562,18 +2580,18 @@ class OverlayControlWindow(QMainWindow):
         try:
             if window_id is not None:
                 if shutil.which("wmctrl"):
-                    subprocess.run(["wmctrl", "-ia", hex(window_id)], check=False, capture_output=True)
+                    subprocess.run(["wmctrl", "-ia", hex(window_id)], check=False, capture_output=True, timeout=3)
                 else:
                     subprocess.run(
-                        ["xdotool", "windowfocus", "--sync", str(window_id)],
-                        check=False, capture_output=True,
+                        ["xdotool", "windowfocus", str(window_id)],
+                        check=False, capture_output=True, timeout=3,
                     )
                 time.sleep(0.15)
-            subprocess.run(["xdotool", "mousemove", "--sync", str(cx), str(cy)], check=False, capture_output=True)
+            subprocess.run(["xdotool", "mousemove", str(cx), str(cy)], check=False, capture_output=True, timeout=3)
             time.sleep(0.1)
-            subprocess.run(["xdotool", "mousedown", "--clearmodifiers", "1"], check=False, capture_output=True)
+            subprocess.run(["xdotool", "mousedown", "--clearmodifiers", "1"], check=False, capture_output=True, timeout=3)
             time.sleep(0.08)
-            subprocess.run(["xdotool", "mouseup", "--clearmodifiers", "1"], check=False, capture_output=True)
+            subprocess.run(["xdotool", "mouseup", "--clearmodifiers", "1"], check=False, capture_output=True, timeout=3)
         except Exception:
             pass
 
@@ -2675,7 +2693,15 @@ class OverlayControlWindow(QMainWindow):
             "error":   QColor("#8b1a1a"),
         }
         color = color_map.get(level, color_map["info"])
-        timestamp = datetime.now().strftime("%H:%M:%S")
+        timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+
+        # Persist to log file.
+        try:
+            self._LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+            with self._LOG_PATH.open("a") as _lf:
+                _lf.write(f"[{timestamp}] [{level}] {message}\n")
+        except Exception:
+            pass
 
         key = self._normalize_log_key(message)
         if key == self._log_last_key and self._log_last_item is not None:
@@ -2801,6 +2827,7 @@ class OverlayControlWindow(QMainWindow):
     # ── Persistent preferences ────────────────────────────────────────────────────
 
     _PREFS_PATH = Path.home() / ".local" / "share" / "voltorb-solver" / "prefs.json"
+    _LOG_PATH = Path.home() / ".local" / "share" / "voltorb-solver" / "play.log"
 
     def _save_prefs(self) -> None:
         """Persist user preferences (currently: last target window name)."""
