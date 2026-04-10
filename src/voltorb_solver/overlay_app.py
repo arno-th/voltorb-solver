@@ -1962,6 +1962,9 @@ class OverlayControlWindow(QMainWindow):
             self._play_level_running = True
             self._play_dialog_steps = 0
             self.start_play_btn.setText("Stop Play")
+            if not self.prob_overlay_btn.isChecked():
+                self.prob_overlay_btn.setChecked(True)
+            self.prob_overlay_btn.setEnabled(False)
             self._set_status("Resuming play from current board state…", "info")
             QTimer.singleShot(0, self._play_step)
             return
@@ -1984,6 +1987,9 @@ class OverlayControlWindow(QMainWindow):
         self._play_iteration = 0
         self._play_dialog_steps = 0
         self.start_play_btn.setText("Stop Play")
+        if not self.prob_overlay_btn.isChecked():
+            self.prob_overlay_btn.setChecked(True)
+        self.prob_overlay_btn.setEnabled(False)
 
         # Check if the Play Level dialog is showing before the board is visible.
         # Search directly in the already-captured tmp_path rather than re-capturing, so
@@ -2153,6 +2159,7 @@ class OverlayControlWindow(QMainWindow):
         """Stop the state machine and reset the button."""
         self._play_level_running = False
         self.start_play_btn.setText("Start + Play")
+        self.prob_overlay_btn.setEnabled(True)
         # Restore overlays in case they were hidden during a dialog sequence.
         if self.overlay_btn.isChecked():
             self.x11_overlay.show()
