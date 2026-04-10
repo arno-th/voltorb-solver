@@ -15,22 +15,25 @@ from voltorb_solver.stats import RoundCounts
 
 
 class _WinRateBar(QWidget):
-    """Horizontal stacked bar: green portion = wins, red = bombs."""
+    """Horizontal stacked bar: green = wins, red = unlucky bombs, purple = miscalc bombs."""
 
     _WIN_COLOR = QColor("#22c55e")
-    _BOMB_COLOR = QColor("#ef4444")
+    _UNLUCKY_COLOR = QColor("#ef4444")
+    _MISCALC_COLOR = QColor("#7c3aed")
     _EMPTY_COLOR = QColor("#e2e8f0")
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._wins = 0
-        self._bombs = 0
+        self._unlucky = 0
+        self._miscalc = 0
         self.setFixedHeight(14)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
-    def set_data(self, wins: int, bombs: int) -> None:
+    def set_data(self, wins: int, unlucky: int, miscalc: int) -> None:
         self._wins = wins
-        self._bombs = bombs
+        self._unlucky = unlucky
+        self._miscalc = miscalc
         self.update()
 
     def paintEvent(self, event) -> None:  # noqa: N802
@@ -39,7 +42,7 @@ class _WinRateBar(QWidget):
         r = self.rect()
         w, h = r.width(), r.height()
         radius = h // 2
-        total = self._wins + self._bombs
+        total = self._wins + self._unlucky + self._miscalc
 
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(self._EMPTY_COLOR)
@@ -49,6 +52,8 @@ class _WinRateBar(QWidget):
             return
 
         win_w = max(0, min(w, round(w * self._wins / total)))
+        unlucky_w = max(0, min(w - win_w, round(w * self._unlucky / total)))
+        miscalc_w = w - win_w - unlucky_w
 
         if win_w > 0:
             p.setBrush(self._WIN_COLOR)
@@ -56,9 +61,15 @@ class _WinRateBar(QWidget):
             p.drawRoundedRect(r, radius, radius)
             p.setClipping(False)
 
-        if win_w < w:
-            p.setBrush(self._BOMB_COLOR)
-            p.setClipRect(win_w, 0, w - win_w, h)
+        if unlucky_w > 0:
+            p.setBrush(self._UNLUCKY_COLOR)
+            p.setClipRect(win_w, 0, unlucky_w, h)
+            p.drawRoundedRect(r, radius, radius)
+            p.setClipping(False)
+
+        if miscalc_w > 0:
+            p.setBrush(self._MISCALC_COLOR)
+            p.setClipRect(win_w + unlucky_w, 0, miscalc_w, h)
             p.drawRoundedRect(r, radius, radius)
             p.setClipping(False)
 
@@ -199,8 +210,8 @@ class StatsPanel(QWidget):
         self._lifetime_col.refresh(lifetime)
         self._session_col.refresh(session)
 
-        self._lifetime_bar.set_data(lifetime.wins, lifetime.bombs_hit)
-        self._session_bar.set_data(session.wins, session.bombs_hit)
+        self._lifetime_bar.set_data(lifetime.wins, lifetime.unlucky_bombs, lifetime.miscalc_bombs)
+        self._session_bar.set_data(session.wins, session.unlucky_bombs, session.miscalc_bombs)
 
         self._lifetime_pct.setText(
             f"{lifetime.win_rate:.1%}" if lifetime.rounds_played else "—"
