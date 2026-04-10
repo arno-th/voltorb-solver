@@ -555,6 +555,8 @@ class OverlayControlWindow(QMainWindow):
         self._prob_hotkey_activated.connect(self._on_prob_hotkey_triggered)
         self._play_click_done.connect(self._play_after_click)
         self._last_click_bomb_prob: float = 1.0  # bomb probability of the most recently clicked tile
+        self._pre_click_screenshot_path: str | None = None
+        self._pre_click_state_snapshot: dict | None = None
         self._anchor_board_rect: tuple[int, int, int, int] | None = None  # (left, top, right, bottom) image px
         self._anchor_image_size: tuple[int, int] | None = None
 
@@ -2203,12 +2205,15 @@ class OverlayControlWindow(QMainWindow):
             pos = (int(m.group(1)), int(m.group(2)))
             bomb_prob = snapshot.bomb_probabilities.get(pos, 1.0)
             self._last_click_bomb_prob = bomb_prob
+            self._save_pre_click_snapshot(pos, snapshot)
             self._set_status(
                 f"Step {step}: clicking {tile_name} at ({cx},{cy}) "
                 f"[bomb prob {bomb_prob:.1%}, {snapshot.total_configurations} configs]"
             )
         else:
             self._last_click_bomb_prob = 1.0
+            self._pre_click_screenshot_path = None
+            self._pre_click_state_snapshot = None
             self._set_status(f"Step {step}: clicking {tile_name} at ({cx},{cy})")
 
         window_id = self.state.target_window_id
@@ -2257,8 +2262,11 @@ class OverlayControlWindow(QMainWindow):
                     f"  Step {step} dialog {ds}: game-failed textbox autofaded — "
                     "Play Level prompt detected, recording bomb…", "warning"
                 )
-                self.stats.record_bomb(is_miscalc=self._last_click_bomb_prob <= 1e-12)
+                is_miscalc = self._last_click_bomb_prob <= 1e-12
+                self.stats.record_bomb(is_miscalc=is_miscalc)
                 self.stats_panel.refresh(self.stats.lifetime, self.stats.session)
+                if is_miscalc:
+                    self._save_miscalc_artifacts()
                 self._play_dialog_steps = 0
                 QTimer.singleShot(0, self._play_wait_for_play_level_after_fail)
                 return
@@ -2287,8 +2295,11 @@ class OverlayControlWindow(QMainWindow):
             return
         if is_failed:
             self._set_status("  Game Failed (voltorb!) detected — advancing to Play Level prompt…", "warning", new_group=True)
-            self.stats.record_bomb(is_miscalc=self._last_click_bomb_prob <= 1e-12)
+            is_miscalc = self._last_click_bomb_prob <= 1e-12
+            self.stats.record_bomb(is_miscalc=is_miscalc)
             self.stats_panel.refresh(self.stats.lifetime, self.stats.session)
+            if is_miscalc:
+                self._save_miscalc_artifacts()
             self._play_dialog_steps = 0
             QTimer.singleShot(self._play_dialog_delay_ms, self._play_wait_for_play_level_after_fail)
             return
@@ -2876,10 +2887,90 @@ class OverlayControlWindow(QMainWindow):
         self._update_target_window_button()
         self._set_status("Cleared target window. Capture will use selected monitor.", level="info")
 
+    # ── Miscalc diagnostics ───────────────────────────────────────────────────────
+
+    def _save_pre_click_snapshot(self, tile_pos: tuple[int, int], snapshot) -> None:
+        """Capture a screenshot and serialize game+solver state just before a tile click."""
+        try:
+            tmp_path = str(
+                Path(gettempdir())
+                / f"voltorb_pre_click_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.png"
+            )
+            if self.state.target_window_id is not None:
+                pixmap = self._capture_window(self.state.target_window_id)
+            else:
+                screen = self._get_selected_screen()
+                pixmap = screen.grabWindow(0) if screen is not None else None
+
+            if pixmap is not None and not pixmap.isNull() and pixmap.save(tmp_path):
+                self._pre_click_screenshot_path = tmp_path
+            else:
+                self._pre_click_screenshot_path = None
+
+            r, c = tile_pos
+            self._pre_click_state_snapshot = {
+                "clicked_tile": [r, c],
+                "clicked_tile_bomb_prob": self._last_click_bomb_prob,
+                "row_clues": [
+                    {"voltorbs": cl.voltorbs, "total": cl.total}
+                    for cl in self._game_state.row_clues
+                ],
+                "col_clues": [
+                    {"voltorbs": cl.voltorbs, "total": cl.total}
+                    for cl in self._game_state.col_clues
+                ],
+                "board": [
+                    [{"revealed": tile.revealed, "value": tile.value} for tile in row]
+                    for row in self._game_state.board
+                ],
+                "clue_parsed_values": {
+                    k: list(v) for k, v in self._clue_parsed_values.items()
+                },
+                "solver": {
+                    "total_configurations": snapshot.total_configurations,
+                    "bomb_probabilities": {
+                        f"{pos[0]},{pos[1]}": round(prob, 6)
+                        for pos, prob in snapshot.bomb_probabilities.items()
+                    },
+                    "value_probabilities": {
+                        f"{pos[0]},{pos[1]}": {str(k): round(v, 6) for k, v in probs.items()}
+                        for pos, probs in snapshot.value_probabilities.items()
+                    },
+                },
+            }
+        except Exception:
+            self._pre_click_screenshot_path = None
+            self._pre_click_state_snapshot = None
+
+    def _save_miscalc_artifacts(self) -> None:
+        """Copy pre-click screenshot and state JSON to the miscalc log directory."""
+        try:
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            out_dir = self._MISCALC_LOG_DIR / stamp
+            out_dir.mkdir(parents=True, exist_ok=True)
+
+            if self._pre_click_screenshot_path:
+                src = Path(self._pre_click_screenshot_path)
+                if src.exists():
+                    shutil.copy2(src, out_dir / "screenshot.png")
+
+            if self._pre_click_state_snapshot is not None:
+                (out_dir / "state.json").write_text(
+                    json.dumps(self._pre_click_state_snapshot, indent=2)
+                )
+
+            self._set_status(
+                f"Miscalc artifacts saved \u2192 {out_dir}",
+                level="warning",
+            )
+        except Exception as exc:
+            self._set_status(f"Failed to save miscalc artifacts: {exc}", level="error")
+
     # ── Persistent preferences ────────────────────────────────────────────────────
 
     _PREFS_PATH = Path.home() / ".local" / "share" / "voltorb-solver" / "prefs.json"
     _LOG_PATH = Path.home() / ".local" / "share" / "voltorb-solver" / "play.log"
+    _MISCALC_LOG_DIR = Path.home() / ".local" / "share" / "voltorb-solver" / "miscalc_logs"
 
     def _save_prefs(self) -> None:
         """Persist user preferences (currently: last target window name)."""
