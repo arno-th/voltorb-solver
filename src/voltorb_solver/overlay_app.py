@@ -514,6 +514,7 @@ class OverlayControlWindow(QMainWindow):
     _play_click_done = Signal()
     # Emitted from the pynput listener thread to marshal hotkey activation to main thread.
     _hotkey_activated = Signal()
+    _prob_hotkey_activated = Signal()
 
     def __init__(self) -> None:
         super().__init__()
@@ -548,6 +549,10 @@ class OverlayControlWindow(QMainWindow):
         self._hotkey_shortcut: QShortcut | None = None
         self._global_hotkey = _GlobalHotkeyListener(self._hotkey_activated.emit)
         self._hotkey_activated.connect(self._on_hotkey_triggered)
+        self._hotkey_prob_sequence = QKeySequence("O")
+        self._hotkey_prob_shortcut: QShortcut | None = None
+        self._global_prob_hotkey = _GlobalHotkeyListener(self._prob_hotkey_activated.emit)
+        self._prob_hotkey_activated.connect(self._on_prob_hotkey_triggered)
         self._play_click_done.connect(self._play_after_click)
         self._anchor_board_rect: tuple[int, int, int, int] | None = None  # (left, top, right, bottom) image px
         self._anchor_image_size: tuple[int, int] | None = None
@@ -778,6 +783,12 @@ class OverlayControlWindow(QMainWindow):
         self.hotkey_edit.setToolTip("Global hotkey to start or stop automated play")
         self.hotkey_edit.keySequenceChanged.connect(self._on_hotkey_changed)
 
+        self.prob_hotkey_edit = QKeySequenceEdit(self._hotkey_prob_sequence)
+        self.prob_hotkey_edit.setMaximumSequenceLength(1)
+        self.prob_hotkey_edit.setFixedWidth(120)
+        self.prob_hotkey_edit.setToolTip("Global hotkey to toggle the probability overlay")
+        self.prob_hotkey_edit.keySequenceChanged.connect(self._on_prob_hotkey_changed)
+
         timing_grid = QGridLayout()
         timing_grid.setHorizontalSpacing(8)
         timing_grid.setVerticalSpacing(6)
@@ -790,8 +801,10 @@ class OverlayControlWindow(QMainWindow):
         timing_grid.addWidget(self.poll_delay_spin, 1, 1)
         timing_grid.addWidget(QLabel("Refresh delay:"), 1, 2)
         timing_grid.addWidget(self.refresh_delay_spin, 1, 3)
-        timing_grid.addWidget(QLabel("Hotkey:"), 2, 0)
+        timing_grid.addWidget(QLabel("Play hotkey:"), 2, 0)
         timing_grid.addWidget(self.hotkey_edit, 2, 1)
+        timing_grid.addWidget(QLabel("Overlay hotkey:"), 2, 2)
+        timing_grid.addWidget(self.prob_hotkey_edit, 2, 3)
         config_content_layout.addLayout(timing_grid)
 
         config_layout.addWidget(self.config_content)
@@ -1125,6 +1138,7 @@ class OverlayControlWindow(QMainWindow):
         self._set_status("No screenshot parsed yet.", level="info")
         self._refresh_monitor_list()
         self._install_hotkey()
+        self._install_prob_hotkey()
         self._restore_window_from_prefs()
 
     def _install_hotkey(self) -> None:
@@ -1144,15 +1158,41 @@ class OverlayControlWindow(QMainWindow):
                 self._hotkey_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
                 self._hotkey_shortcut.activated.connect(self._on_hotkey_triggered)
 
+    def _install_prob_hotkey(self) -> None:
+        """Install the probability-overlay toggle hotkey globally (pynput) with QShortcut as fallback."""
+        if self._hotkey_prob_shortcut is not None:
+            self._hotkey_prob_shortcut.setEnabled(False)
+            self._hotkey_prob_shortcut.deleteLater()
+            self._hotkey_prob_shortcut = None
+
+        if _pynput_kb is not None:
+            self._global_prob_hotkey.set_key_sequence(self._hotkey_prob_sequence)
+        else:
+            if not self._hotkey_prob_sequence.isEmpty():
+                self._hotkey_prob_shortcut = QShortcut(self._hotkey_prob_sequence, self)
+                self._hotkey_prob_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
+                self._hotkey_prob_shortcut.activated.connect(self._on_prob_hotkey_triggered)
+
     def _on_hotkey_triggered(self) -> None:
         # Ignore triggers while recording a new shortcut.
         if hasattr(self, "hotkey_edit") and self.hotkey_edit.hasFocus():
             return
         self._start_and_play()
 
+    def _on_prob_hotkey_triggered(self) -> None:
+        if hasattr(self, "prob_hotkey_edit") and self.prob_hotkey_edit.hasFocus():
+            return
+        self.prob_overlay_btn.toggle()
+
     def _on_hotkey_changed(self, seq: QKeySequence) -> None:
         self._hotkey_sequence = seq
         self._install_hotkey()
+        self._save_prefs()
+
+    def _on_prob_hotkey_changed(self, seq: QKeySequence) -> None:
+        self._hotkey_prob_sequence = seq
+        self._install_prob_hotkey()
+        self._save_prefs()
 
     def _apply_styles(self) -> None:
         self.setStyleSheet(
@@ -2845,6 +2885,10 @@ class OverlayControlWindow(QMainWindow):
             data["target_window_class"] = self.state.target_window_class
             screen = self._get_selected_screen()
             data["monitor_name"] = screen.name() if screen is not None else None
+            hotkey_str = self._hotkey_sequence.toString(QKeySequence.SequenceFormat.PortableText)
+            data["hotkey"] = hotkey_str if hotkey_str else None
+            prob_hotkey_str = self._hotkey_prob_sequence.toString(QKeySequence.SequenceFormat.PortableText)
+            data["prob_hotkey"] = prob_hotkey_str if prob_hotkey_str else None
             self._PREFS_PATH.write_text(json.dumps(data, indent=2))
             if self.state.target_window_name is not None:
                 self._set_status(
@@ -2877,6 +2921,26 @@ class OverlayControlWindow(QMainWindow):
                         self.simple_overlay.set_target_screen(screen)
                         self._update_monitor_hint()
                     break
+
+        # Restore hotkey sequences.
+        saved_hotkey: str | None = data.get("hotkey")
+        if saved_hotkey:
+            seq = QKeySequence(saved_hotkey)
+            if not seq.isEmpty():
+                self._hotkey_sequence = seq
+                self.hotkey_edit.blockSignals(True)
+                self.hotkey_edit.setKeySequence(seq)
+                self.hotkey_edit.blockSignals(False)
+                self._install_hotkey()
+        saved_prob_hotkey: str | None = data.get("prob_hotkey")
+        if saved_prob_hotkey:
+            seq = QKeySequence(saved_prob_hotkey)
+            if not seq.isEmpty():
+                self._hotkey_prob_sequence = seq
+                self.prob_hotkey_edit.blockSignals(True)
+                self.prob_hotkey_edit.setKeySequence(seq)
+                self.prob_hotkey_edit.blockSignals(False)
+                self._install_prob_hotkey()
 
         # Restore target window. Prefer WM_CLASS (stable) over title (may change).
         saved_name: str | None = data.get("target_window_name")
