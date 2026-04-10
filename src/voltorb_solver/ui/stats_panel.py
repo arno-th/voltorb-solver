@@ -107,9 +107,17 @@ class _StatsColumn(QWidget):
         self._bombs = _val_label("#dc2626")
         grid.addWidget(self._bombs, 2, 1)
 
-        grid.addWidget(_key_label("Win Rate"), 3, 0)
+        grid.addWidget(_key_label("  Unlucky"), 3, 0)
+        self._unlucky = _val_label("#f97316")
+        grid.addWidget(self._unlucky, 3, 1)
+
+        grid.addWidget(_key_label("  Miscalc"), 4, 0)
+        self._miscalc = _val_label("#7c3aed")
+        grid.addWidget(self._miscalc, 4, 1)
+
+        grid.addWidget(_key_label("Win Rate"), 5, 0)
         self._rate = _val_label()
-        grid.addWidget(self._rate, 3, 1)
+        grid.addWidget(self._rate, 5, 1)
 
         layout.addLayout(grid)
 
@@ -117,6 +125,8 @@ class _StatsColumn(QWidget):
         self._rounds.setText(str(counts.rounds_played))
         self._wins.setText(str(counts.wins))
         self._bombs.setText(str(counts.bombs_hit))
+        self._unlucky.setText(str(counts.unlucky_bombs))
+        self._miscalc.setText(str(counts.miscalc_bombs))
         self._rate.setText(f"{counts.win_rate:.1%}" if counts.rounds_played else "—")
 
 

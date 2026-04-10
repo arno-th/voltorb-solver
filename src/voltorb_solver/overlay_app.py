@@ -554,6 +554,7 @@ class OverlayControlWindow(QMainWindow):
         self._global_prob_hotkey = _GlobalHotkeyListener(self._prob_hotkey_activated.emit)
         self._prob_hotkey_activated.connect(self._on_prob_hotkey_triggered)
         self._play_click_done.connect(self._play_after_click)
+        self._last_click_bomb_prob: float = 1.0  # bomb probability of the most recently clicked tile
         self._anchor_board_rect: tuple[int, int, int, int] | None = None  # (left, top, right, bottom) image px
         self._anchor_image_size: tuple[int, int] | None = None
 
@@ -2201,11 +2202,13 @@ class OverlayControlWindow(QMainWindow):
             snapshot = solve_game_state(self._game_state)
             pos = (int(m.group(1)), int(m.group(2)))
             bomb_prob = snapshot.bomb_probabilities.get(pos, 1.0)
+            self._last_click_bomb_prob = bomb_prob
             self._set_status(
                 f"Step {step}: clicking {tile_name} at ({cx},{cy}) "
                 f"[bomb prob {bomb_prob:.1%}, {snapshot.total_configurations} configs]"
             )
         else:
+            self._last_click_bomb_prob = 1.0
             self._set_status(f"Step {step}: clicking {tile_name} at ({cx},{cy})")
 
         window_id = self.state.target_window_id
@@ -2254,7 +2257,7 @@ class OverlayControlWindow(QMainWindow):
                     f"  Step {step} dialog {ds}: game-failed textbox autofaded — "
                     "Play Level prompt detected, recording bomb…", "warning"
                 )
-                self.stats.record_bomb()
+                self.stats.record_bomb(is_miscalc=self._last_click_bomb_prob <= 1e-12)
                 self.stats_panel.refresh(self.stats.lifetime, self.stats.session)
                 self._play_dialog_steps = 0
                 QTimer.singleShot(0, self._play_wait_for_play_level_after_fail)
@@ -2284,7 +2287,7 @@ class OverlayControlWindow(QMainWindow):
             return
         if is_failed:
             self._set_status("  Game Failed (voltorb!) detected — advancing to Play Level prompt…", "warning", new_group=True)
-            self.stats.record_bomb()
+            self.stats.record_bomb(is_miscalc=self._last_click_bomb_prob <= 1e-12)
             self.stats_panel.refresh(self.stats.lifetime, self.stats.session)
             self._play_dialog_steps = 0
             QTimer.singleShot(self._play_dialog_delay_ms, self._play_wait_for_play_level_after_fail)
