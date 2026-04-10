@@ -1134,6 +1134,7 @@ class OverlayControlWindow(QMainWindow):
         layout.addStretch(1)
 
         self.stats = StatsManager()
+        self.stats_panel.refresh(self.stats.lifetime, self.stats.session)
 
         self._apply_styles()
         self._update_target_window_button()
