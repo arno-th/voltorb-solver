@@ -2270,8 +2270,7 @@ class OverlayControlWindow(QMainWindow):
                 is_miscalc = self._last_click_bomb_prob == 0.0
                 self.stats.record_bomb(is_miscalc=is_miscalc)
                 self.stats_panel.refresh(self.stats.lifetime, self.stats.session)
-                if is_miscalc:
-                    self._save_miscalc_artifacts()
+                self._save_fail_artifacts(is_miscalc=is_miscalc)
                 self._play_dialog_steps = 0
                 QTimer.singleShot(0, self._play_wait_for_play_level_after_fail)
                 return
@@ -2303,8 +2302,7 @@ class OverlayControlWindow(QMainWindow):
             is_miscalc = self._last_click_bomb_prob == 0.0
             self.stats.record_bomb(is_miscalc=is_miscalc)
             self.stats_panel.refresh(self.stats.lifetime, self.stats.session)
-            if is_miscalc:
-                self._save_miscalc_artifacts()
+            self._save_fail_artifacts(is_miscalc=is_miscalc)
             self._play_dialog_steps = 0
             QTimer.singleShot(self._play_dialog_delay_ms, self._play_wait_for_play_level_after_fail)
             return
@@ -2956,11 +2954,12 @@ class OverlayControlWindow(QMainWindow):
         except Exception:
             self._pre_click_state_snapshot = None
 
-    def _save_miscalc_artifacts(self) -> None:
-        """Move pre-click screenshot and state JSON to the miscalc log directory."""
+    def _save_fail_artifacts(self, *, is_miscalc: bool) -> None:
+        """Save pre-click screenshot and state JSON for every bomb hit."""
         try:
             stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-            out_dir = self._MISCALC_LOG_DIR / stamp
+            prefix = "miscalc" if is_miscalc else "unlucky"
+            out_dir = self._FAIL_LOG_DIR / f"{prefix}_{stamp}"
             out_dir.mkdir(parents=True, exist_ok=True)
 
             if self._pre_click_screenshot_path:
@@ -2970,22 +2969,23 @@ class OverlayControlWindow(QMainWindow):
                 self._pre_click_screenshot_path = None
 
             if self._pre_click_state_snapshot is not None:
-                (out_dir / "state.json").write_text(
-                    json.dumps(self._pre_click_state_snapshot, indent=2)
-                )
+                snapshot = dict(self._pre_click_state_snapshot)
+                snapshot["is_miscalc"] = is_miscalc
+                (out_dir / "state.json").write_text(json.dumps(snapshot, indent=2))
 
+            label = "Miscalc" if is_miscalc else "Fail"
             self._set_status(
-                f"Miscalc artifacts saved \u2192 {out_dir}",
+                f"{label} artifacts saved \u2192 {out_dir}",
                 level="warning",
             )
         except Exception as exc:
-            self._set_status(f"Failed to save miscalc artifacts: {exc}", level="error")
+            self._set_status(f"Failed to save fail artifacts: {exc}", level="error")
 
     # ── Persistent preferences ────────────────────────────────────────────────────
 
     _PREFS_PATH = Path.home() / ".local" / "share" / "voltorb-solver" / "prefs.json"
     _LOG_PATH = Path.home() / ".local" / "share" / "voltorb-solver" / "play.log"
-    _MISCALC_LOG_DIR = Path.home() / ".local" / "share" / "voltorb-solver" / "miscalc_logs"
+    _FAIL_LOG_DIR = Path.home() / ".local" / "share" / "voltorb-solver" / "fail_logs"
 
     def _save_prefs(self) -> None:
         """Persist user preferences (currently: last target window name)."""
