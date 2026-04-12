@@ -555,8 +555,9 @@ class OverlayControlWindow(QMainWindow):
         self._prob_hotkey_activated.connect(self._on_prob_hotkey_triggered)
         self._play_click_done.connect(self._play_after_click)
         self._last_click_bomb_prob: float = 1.0  # bomb probability of the most recently clicked tile
-        self._pre_click_screenshot_path: str | None = None
-        self._pre_click_state_snapshot: dict | None = None
+        self._state_ring: list[dict | None] = [None, None]  # ring of last 2 pre-click state snapshots
+        self._state_ring_idx: int = -1  # points at the most-recently written slot (-1 = none yet)
+        self._screenshot_ring_idx: int = -1  # points at the most-recently written slot (-1 = none yet)
         self._anchor_board_rect: tuple[int, int, int, int] | None = None  # (left, top, right, bottom) image px
         self._anchor_image_size: tuple[int, int] | None = None
 
@@ -2181,10 +2182,6 @@ class OverlayControlWindow(QMainWindow):
         step = self._play_iteration
         self._set_status(f"── Step {step}: finding best tile…")
 
-        # Capture screenshot first — before any Qt event processing (_set_status,
-        # grabWindow, etc.) can deliver queued X11 damage/paint events that would
-        # show the post-click board state.
-        self._refresh_pre_click_screenshot()
         click_info = self._play_find_best_tile()
         if click_info is None:
             snapshot = solve_game_state(self._game_state)
@@ -2217,11 +2214,16 @@ class OverlayControlWindow(QMainWindow):
             )
         else:
             self._last_click_bomb_prob = 1.0
-            self._pre_click_screenshot_path = None
-            self._pre_click_state_snapshot = None
             self._set_status(f"Step {step}: clicking {tile_name} at ({cx},{cy})")
 
         window_id = self.state.target_window_id
+        # Take the screenshot here — the very last thing before the click fires.
+        # Crucially, this is only reached when we are certain a click will be
+        # dispatched.  If _play_step is re-entered early (e.g. after a game-failed
+        # textbox autofades and _refresh_tiles is called) and finds no tile to
+        # click, we return above without overwriting the previous screenshot, so
+        # the bomb-state artifact is preserved.
+        self._refresh_pre_click_screenshot()
 
         def _click_bg() -> None:
             self._play_do_xdotool_click(cx, cy, window_id)
@@ -2892,18 +2894,24 @@ class OverlayControlWindow(QMainWindow):
 
     # ── Miscalc diagnostics ───────────────────────────────────────────────────────
 
-    # Fixed temp path for the pre-click screenshot — overwritten each step,
-    # moved to the miscalc log only when a bomb is detected.
-    _PRE_CLICK_TEMP_PATH = Path(gettempdir()) / "voltorb_pre_click.png"
+    # Rolling ring-buffer of the last 2 pre-click screenshots.
+    # Slot index cycles 0..1; the most-recent slot is _screenshot_ring_idx.
+    _SCREENSHOT_RING_SIZE = 2
+    _SCREENSHOT_RING_PATHS = [
+        Path(gettempdir()) / f"voltorb_pre_click_{i}.png"
+        for i in range(_SCREENSHOT_RING_SIZE)
+    ]
 
     def _refresh_pre_click_screenshot(self) -> None:
-        """Overwrite the temp screenshot with the current screen state.
+        """Write the current screen into the next ring-buffer slot.
 
         Called as the very last step before dispatching the xdotool click so
         that the image reflects the board immediately before the reveal.
+        Only advances the ring index when the save actually succeeds.
         """
         try:
-            tmp_path = str(self._PRE_CLICK_TEMP_PATH)
+            next_idx = (self._screenshot_ring_idx + 1) % self._SCREENSHOT_RING_SIZE
+            tmp_path = str(self._SCREENSHOT_RING_PATHS[next_idx])
             if self.state.target_window_id is not None:
                 pixmap = self._capture_window(self.state.target_window_id)
             else:
@@ -2911,17 +2919,16 @@ class OverlayControlWindow(QMainWindow):
                 pixmap = screen.grabWindow(0) if screen is not None else None
 
             if pixmap is not None and not pixmap.isNull() and pixmap.save(tmp_path):
-                self._pre_click_screenshot_path = tmp_path
-            else:
-                self._pre_click_screenshot_path = None
+                self._screenshot_ring_idx = next_idx
         except Exception:
-            self._pre_click_screenshot_path = None
+            pass
 
     def _save_pre_click_snapshot(self, tile_pos: tuple[int, int], snapshot) -> None:
         """Serialize game+solver state just before a tile click (no screenshot)."""
         try:
             r, c = tile_pos
-            self._pre_click_state_snapshot = {
+            next_idx = (self._state_ring_idx + 1) % len(self._state_ring)
+            self._state_ring[next_idx] = {
                 "clicked_tile": [r, c],
                 "clicked_tile_bomb_prob": self._last_click_bomb_prob,
                 "row_clues": [
@@ -2951,27 +2958,36 @@ class OverlayControlWindow(QMainWindow):
                     },
                 },
             }
+            self._state_ring_idx = next_idx
         except Exception:
-            self._pre_click_state_snapshot = None
+            pass
 
     def _save_fail_artifacts(self, *, is_miscalc: bool) -> None:
-        """Save pre-click screenshot and state JSON for every bomb hit."""
+        """Save pre-click screenshot ring and state JSON for every bomb hit."""
         try:
             stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
             prefix = "miscalc" if is_miscalc else "unlucky"
             out_dir = self._FAIL_LOG_DIR / f"{prefix}_{stamp}"
             out_dir.mkdir(parents=True, exist_ok=True)
 
-            if self._pre_click_screenshot_path:
-                src = Path(self._pre_click_screenshot_path)
-                if src.exists():
-                    shutil.move(str(src), out_dir / "screenshot.png")
-                self._pre_click_screenshot_path = None
+            # Copy ring slots and state JSONs, named by age (0 = most recent).
+            n = self._SCREENSHOT_RING_SIZE
+            if self._screenshot_ring_idx >= 0:
+                for age in range(n):
+                    slot = (self._screenshot_ring_idx - age) % n
+                    src = self._SCREENSHOT_RING_PATHS[slot]
+                    if src.exists():
+                        shutil.copy2(str(src), out_dir / f"screenshot_{age}.png")
 
-            if self._pre_click_state_snapshot is not None:
-                snapshot = dict(self._pre_click_state_snapshot)
-                snapshot["is_miscalc"] = is_miscalc
-                (out_dir / "state.json").write_text(json.dumps(snapshot, indent=2))
+            ns = len(self._state_ring)
+            if self._state_ring_idx >= 0:
+                for age in range(ns):
+                    slot = (self._state_ring_idx - age) % ns
+                    state = self._state_ring[slot]
+                    if state is not None:
+                        entry = dict(state)
+                        entry["is_miscalc"] = is_miscalc
+                        (out_dir / f"state_{age}.json").write_text(json.dumps(entry, indent=2))
 
             label = "Miscalc" if is_miscalc else "Fail"
             self._set_status(
