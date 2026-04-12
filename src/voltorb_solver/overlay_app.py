@@ -2181,6 +2181,10 @@ class OverlayControlWindow(QMainWindow):
         step = self._play_iteration
         self._set_status(f"── Step {step}: finding best tile…")
 
+        # Capture screenshot first — before any Qt event processing (_set_status,
+        # grabWindow, etc.) can deliver queued X11 damage/paint events that would
+        # show the post-click board state.
+        self._refresh_pre_click_screenshot()
         click_info = self._play_find_best_tile()
         if click_info is None:
             snapshot = solve_game_state(self._game_state)
@@ -2263,7 +2267,7 @@ class OverlayControlWindow(QMainWindow):
                     f"  Step {step} dialog {ds}: game-failed textbox autofaded — "
                     "Play Level prompt detected, recording bomb…", "warning"
                 )
-                is_miscalc = self._last_click_bomb_prob <= 1e-12
+                is_miscalc = self._last_click_bomb_prob == 0.0
                 self.stats.record_bomb(is_miscalc=is_miscalc)
                 self.stats_panel.refresh(self.stats.lifetime, self.stats.session)
                 if is_miscalc:
@@ -2296,7 +2300,7 @@ class OverlayControlWindow(QMainWindow):
             return
         if is_failed:
             self._set_status("  Game Failed (voltorb!) detected — advancing to Play Level prompt…", "warning", new_group=True)
-            is_miscalc = self._last_click_bomb_prob <= 1e-12
+            is_miscalc = self._last_click_bomb_prob == 0.0
             self.stats.record_bomb(is_miscalc=is_miscalc)
             self.stats_panel.refresh(self.stats.lifetime, self.stats.session)
             if is_miscalc:
@@ -2890,13 +2894,18 @@ class OverlayControlWindow(QMainWindow):
 
     # ── Miscalc diagnostics ───────────────────────────────────────────────────────
 
-    def _save_pre_click_snapshot(self, tile_pos: tuple[int, int], snapshot) -> None:
-        """Capture a screenshot and serialize game+solver state just before a tile click."""
+    # Fixed temp path for the pre-click screenshot — overwritten each step,
+    # moved to the miscalc log only when a bomb is detected.
+    _PRE_CLICK_TEMP_PATH = Path(gettempdir()) / "voltorb_pre_click.png"
+
+    def _refresh_pre_click_screenshot(self) -> None:
+        """Overwrite the temp screenshot with the current screen state.
+
+        Called as the very last step before dispatching the xdotool click so
+        that the image reflects the board immediately before the reveal.
+        """
         try:
-            tmp_path = str(
-                Path(gettempdir())
-                / f"voltorb_pre_click_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.png"
-            )
+            tmp_path = str(self._PRE_CLICK_TEMP_PATH)
             if self.state.target_window_id is not None:
                 pixmap = self._capture_window(self.state.target_window_id)
             else:
@@ -2907,7 +2916,12 @@ class OverlayControlWindow(QMainWindow):
                 self._pre_click_screenshot_path = tmp_path
             else:
                 self._pre_click_screenshot_path = None
+        except Exception:
+            self._pre_click_screenshot_path = None
 
+    def _save_pre_click_snapshot(self, tile_pos: tuple[int, int], snapshot) -> None:
+        """Serialize game+solver state just before a tile click (no screenshot)."""
+        try:
             r, c = tile_pos
             self._pre_click_state_snapshot = {
                 "clicked_tile": [r, c],
@@ -2940,11 +2954,10 @@ class OverlayControlWindow(QMainWindow):
                 },
             }
         except Exception:
-            self._pre_click_screenshot_path = None
             self._pre_click_state_snapshot = None
 
     def _save_miscalc_artifacts(self) -> None:
-        """Copy pre-click screenshot and state JSON to the miscalc log directory."""
+        """Move pre-click screenshot and state JSON to the miscalc log directory."""
         try:
             stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
             out_dir = self._MISCALC_LOG_DIR / stamp
@@ -2953,7 +2966,8 @@ class OverlayControlWindow(QMainWindow):
             if self._pre_click_screenshot_path:
                 src = Path(self._pre_click_screenshot_path)
                 if src.exists():
-                    shutil.copy2(src, out_dir / "screenshot.png")
+                    shutil.move(str(src), out_dir / "screenshot.png")
+                self._pre_click_screenshot_path = None
 
             if self._pre_click_state_snapshot is not None:
                 (out_dir / "state.json").write_text(

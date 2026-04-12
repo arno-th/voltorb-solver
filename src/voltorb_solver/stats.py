@@ -11,7 +11,7 @@ _STATS_PATH = Path.home() / ".local" / "share" / "voltorb-solver" / "stats.json"
 class RoundCounts:
     wins: int = 0
     bombs_hit: int = 0
-    miscalc_bombs: int = 0  # subset of bombs_hit where solver thought the tile was safe (P=0%)
+    miscalc_bombs: int = 0  # subset of bombs_hit where solver computed exactly P(bomb)=0
 
     @property
     def rounds_played(self) -> int:
