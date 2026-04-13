@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QPushButton,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
@@ -144,6 +145,8 @@ class _StatsColumn(QWidget):
 class StatsPanel(QWidget):
     """Statistics panel showing lifetime and session win/loss data with bar charts."""
 
+    clear_requested = Signal()
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         outer = QVBoxLayout(self)
@@ -196,12 +199,25 @@ class StatsPanel(QWidget):
 
         outer.addLayout(bars)
 
+        clear_btn = QPushButton("Clear Stats")
+        clear_btn.setObjectName("clearStatsBtn")
+        clear_btn.clicked.connect(lambda: self.clear_requested.emit())
+        outer.addWidget(clear_btn)
+
         self.setStyleSheet(
             """
             QLabel#statsColHeader {
                 font-weight: 700;
                 color: #1d4f91;
                 font-size: 13px;
+            }
+            QPushButton#clearStatsBtn {
+                background-color: #dc2626;
+                font-size: 11px;
+                padding: 4px 8px;
+            }
+            QPushButton#clearStatsBtn:hover {
+                background-color: #b91c1c;
             }
             """
         )

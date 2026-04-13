@@ -146,6 +146,7 @@ class MainWindow(QMainWindow):
         right.addWidget(stats_header)
 
         self.stats_panel = StatsPanel()
+        self.stats_panel.clear_requested.connect(self._clear_lifetime_stats)
         right.addWidget(self.stats_panel)
 
         self._loading_clues = False
@@ -289,6 +290,10 @@ class MainWindow(QMainWindow):
 
     def _refresh_stats(self) -> None:
         self.stats_panel.refresh(self.stats.lifetime, self.stats.session)
+
+    def _clear_lifetime_stats(self) -> None:
+        self.stats.reset_lifetime()
+        self._refresh_stats()
 
     def _sync_clue_widgets(self) -> None:
         self._loading_clues = True

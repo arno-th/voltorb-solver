@@ -1136,6 +1136,7 @@ class OverlayControlWindow(QMainWindow):
 
         self.stats = StatsManager()
         self.stats_panel.refresh(self.stats.lifetime, self.stats.session)
+        self.stats_panel.clear_requested.connect(self._clear_lifetime_stats)
 
         self._apply_styles()
         self._update_target_window_button()
@@ -2961,6 +2962,10 @@ class OverlayControlWindow(QMainWindow):
             self._state_ring_idx = next_idx
         except Exception:
             pass
+
+    def _clear_lifetime_stats(self) -> None:
+        self.stats.reset_lifetime()
+        self.stats_panel.refresh(self.stats.lifetime, self.stats.session)
 
     def _save_fail_artifacts(self, *, is_miscalc: bool) -> None:
         """Save pre-click screenshot ring and state JSON for every bomb hit."""

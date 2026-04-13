@@ -49,6 +49,10 @@ class StatsManager:
             self.session.miscalc_bombs += 1
         self._save()
 
+    def reset_lifetime(self) -> None:
+        self.lifetime = RoundCounts()
+        self._save()
+
     def _load(self) -> None:
         try:
             data = json.loads(_STATS_PATH.read_text())
