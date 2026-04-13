@@ -2284,6 +2284,25 @@ class OverlayControlWindow(QMainWindow):
             if self.prob_overlay_btn.isChecked():
                 self.simple_overlay.show()
             self._refresh_tiles()
+            # If a voltorb tile is now visible on the board the game has already
+            # failed — the textbox either hasn't appeared yet or was missed.
+            # Check this before calling _play_step so _last_click_bomb_prob still
+            # reflects the tile that actually triggered the bomb (not the next
+            # planned tile, which would cause a false miscalc classification).
+            if any(v == 0 for v in self._tile_parsed_values.values()):
+                self.x11_overlay.hide()
+                self.simple_overlay.hide()
+                self._set_status(
+                    f"  Step {step} dialog {ds}: voltorb tile detected on board — recording bomb…",
+                    "warning",
+                )
+                is_miscalc = self._last_click_bomb_prob == 0.0
+                self.stats.record_bomb(is_miscalc=is_miscalc)
+                self.stats_panel.refresh(self.stats.lifetime, self.stats.session)
+                self._save_fail_artifacts(is_miscalc=is_miscalc)
+                self._play_dialog_steps = 0
+                QTimer.singleShot(0, self._play_wait_for_play_level_after_fail)
+                return
             if self._play_level_running:
                 QTimer.singleShot(self._play_refresh_delay_ms, self._play_step)
             return
