@@ -12,7 +12,7 @@ import time
 from tempfile import gettempdir
 
 from PySide6.QtCore import Qt, QRect, QTimer, Signal
-from PySide6.QtGui import QBrush, QColor, QGuiApplication, QKeySequence, QPixmap, QShortcut, QTextCursor
+from PySide6.QtGui import QBrush, QColor, QGuiApplication, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -1681,9 +1681,8 @@ class OverlayControlWindow(QMainWindow):
 
         # Save the full screenshot for debugging alongside the template.
         debug_screenshot_path = template_path.with_suffix(".debug_capture.png")
-        import shutil as _shutil
         try:
-            _shutil.copy2(full_screenshot_path, str(debug_screenshot_path))
+            shutil.copy2(full_screenshot_path, str(debug_screenshot_path))
         except Exception:
             pass
 
@@ -1704,7 +1703,6 @@ class OverlayControlWindow(QMainWindow):
 
     def _load_textbox_offsets(self) -> None:
         """Load board-relative textbox offsets from JSON; silently ignore missing file."""
-        import json
         if not self._textbox_offsets_path.exists():
             return
         try:
@@ -1730,7 +1728,6 @@ class OverlayControlWindow(QMainWindow):
 
     def _save_textbox_offsets(self) -> None:
         """Persist current board-relative textbox offsets to JSON."""
-        import json
         self._textbox_offsets_path.parent.mkdir(parents=True, exist_ok=True)
         data = {
             "x": self._textbox_x,
