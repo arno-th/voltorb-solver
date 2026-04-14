@@ -2,6 +2,12 @@
 
 Live-overlay solver and auto-player for Pokémon HeartGold/SoulSilver Voltorb Flip.
 
+## Demo
+
+<video src="assets/demo.mp4" controls width="800">Demo of Voltorb Solver overlay running on top of a Pokémon HeartGold emulator, showing automatic board detection, probability hints, and auto-play advancing rounds.</video>
+
+The overlay attaches to the emulator window, detects the board via screen capture, and highlights the recommended tile in real time. Auto-play advances the gamestate by clicking on the current best tile.
+
 ## Features
 
 - **Probability solver** — computes per-cell bomb probability and expected value from the row/column clues.
