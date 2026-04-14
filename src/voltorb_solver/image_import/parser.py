@@ -2,10 +2,8 @@ from __future__ import annotations
 
 import csv
 import hashlib
-import os
 from pathlib import Path
 import re
-import shutil
 import statistics
 from datetime import datetime
 from collections import Counter
