@@ -7,7 +7,7 @@ from voltorb_solver.image_import.screen_parser import Region, ScreenBoardParser
 
 
 def _sample_image() -> Path:
-    return Path(__file__).resolve().parent.parent / "GameBoard.png"
+    return Path(__file__).resolve().parent.parent / "assets" / "GameBoard.png"
 
 
 def test_screen_parser_detects_expected_regions() -> None:

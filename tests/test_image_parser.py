@@ -36,7 +36,7 @@ def test_parse_image_warns_when_cv2_unavailable(monkeypatch, tmp_path: Path) -> 
 
 
 def test_parse_known_voltorb_screenshot_when_ocr_available() -> None:
-    sample_path = Path(__file__).resolve().parent.parent / "GameBoard.png"
+    sample_path = Path(__file__).resolve().parent.parent / "assets" / "GameBoard.png"
     if not sample_path.exists():
         pytest.skip("GameBoard.png sample image not available in repository")
 

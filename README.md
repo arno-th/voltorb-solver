@@ -23,7 +23,7 @@ python -m voltorb_solver.main
 To label one screenshot directly from CLI:
 
 ```bash
-python -m voltorb_solver.image_import.screen_parser GameBoard.png labeled.png
+python -m voltorb_solver.image_import.screen_parser assets/GameBoard.png labeled.png
 ```
 
 ## Test
