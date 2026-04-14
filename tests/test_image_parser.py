@@ -35,7 +35,7 @@ def test_parse_image_warns_when_cv2_unavailable(monkeypatch, tmp_path: Path) -> 
     assert any("opencv-python" in warning for warning in result.warnings)
 
 
-def test_parse_known_voltorb_screenshot_when_ocr_available() -> None:
+def test_parse_known_voltorb_screenshot() -> None:
     sample_path = Path(__file__).resolve().parent.parent / "assets" / "GameBoard.png"
     if not sample_path.exists():
         pytest.skip("GameBoard.png sample image not available in repository")
@@ -43,9 +43,6 @@ def test_parse_known_voltorb_screenshot_when_ocr_available() -> None:
     parser = ImageParser()
     width, height = Image.open(sample_path).size
     result = parser.parse_image(str(sample_path), (0, 0, width, height))
-
-    if any("Tesseract OCR engine is unavailable" in warning for warning in result.warnings):
-        pytest.skip("Tesseract runtime not available for OCR regression test")
 
     parsed_rows = [(clue.voltorbs, clue.total) for clue in result.row_clues]
     parsed_cols = [(clue.voltorbs, clue.total) for clue in result.col_clues]
