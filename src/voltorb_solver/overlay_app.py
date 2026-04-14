@@ -518,7 +518,7 @@ class OverlayControlWindow(QMainWindow):
 
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("Voltorb Solver X11 Overlay")
+        self.setWindowTitle("Voltorb Flip Solver")
         self.setMinimumSize(780, 360)
 
         self.parser = ScreenBoardParser()
@@ -609,13 +609,13 @@ class OverlayControlWindow(QMainWindow):
         header_layout.setContentsMargins(14, 12, 14, 12)
         header_layout.setSpacing(6)
 
-        title = QLabel("Voltorb Solver X11 Overlay")
+        title = QLabel("Voltorb Flip Solver")
         title.setObjectName("TitleLabel")
         title.setWordWrap(False)
         header_layout.addWidget(title)
 
         subtitle = QLabel(
-            "Capture a specific monitor, parse board regions, and render the overlay on that same monitor."
+            "Capture, solve, and auto-play Voltorb Flip from an emulator window."
         )
         subtitle.setObjectName("SubtitleLabel")
         subtitle.setWordWrap(True)
@@ -3910,7 +3910,7 @@ class OverlayControlWindow(QMainWindow):
 
     def _show_error(self, message: str) -> None:
         self._set_status(message, level="error")
-        QMessageBox.critical(self, "Voltorb Solver X11 Overlay", message)
+        QMessageBox.critical(self, "Voltorb Flip Solver", message)
 
     def _mapping_rect_for_signature(
         self,
